@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background -->
+  <rect width="512" height="512" rx="100" fill="#4f46e5"/>
+  <!-- Graduation cap -->
+  <polygon points="256,140 420,210 256,280 92,210" fill="white"/>
+  <polygon points="256,280 340,247 340,320 256,350 172,320 172,247" fill="#c7d2fe"/>
+  <!-- Tassel pole -->
+  <rect x="406" y="210" width="10" height="80" rx="5" fill="white"/>
+  <!-- Tassel -->
+  <line x1="411" y1="290" x2="411" y2="340" stroke="white" stroke-width="3"/>
+  <circle cx="411" cy="345" r="8" fill="#e0e7ff"/>
+  <!-- TeachDesk text -->
+  <text x="256" y="420" text-anchor="middle" font-family="Arial, sans-serif" font-weight="bold" font-size="52" fill="white" letter-spacing="1">TeachDesk</text>
+</svg>
