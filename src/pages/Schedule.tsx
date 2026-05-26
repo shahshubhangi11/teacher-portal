@@ -76,13 +76,17 @@ export default function Schedule() {
 
   const handleStudentChange = (studentId: string) => {
     const s = students.find((st) => st.id === studentId)
-    const dur = calcDuration(form.startTime, form.endTime)
+    // Use preset duration if already chosen, otherwise calculate from times
+    const dur = form.durationMinutes > 0 ? form.durationMinutes : calcDuration(form.startTime, form.endTime)
+    const amount = s?.billingType === 'monthly'
+      ? (s.monthlyFee ?? 0)
+      : calcAmount(studentId, dur)
     setForm({
       ...form,
       studentId,
       studentName: s?.name ?? '',
       subject: s?.subjects?.[0] ?? 'English',
-      amount: calcAmount(studentId, dur),
+      amount,
     })
   }
 
@@ -420,16 +424,48 @@ export default function Schedule() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="label">Duration (auto)</label>
-              <div className="input bg-slate-50 text-slate-500">{form.durationMinutes} minutes</div>
-            </div>
-            <div>
-              <label className="label">Amount (₹)</label>
-              <input type="number" className="input" min={0} value={form.amount} onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })} />
-            </div>
-          </div>
+          {/* Duration + Amount */}
+          {(() => {
+            const selectedStudent = students.find((s) => s.id === form.studentId)
+            const hourlyRate = selectedStudent?.hourlyRate ?? 0
+            const isHourly = selectedStudent?.billingType === 'hourly'
+            const isMonthly = selectedStudent?.billingType === 'monthly'
+            const autoAmount = isHourly && hourlyRate > 0
+              ? Math.round((hourlyRate * form.durationMinutes) / 60)
+              : null
+            return (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Duration (auto)</label>
+                  <div className="input bg-slate-50 text-slate-500">{form.durationMinutes} minutes</div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="label mb-0">Amount (₹)</label>
+                    {autoAmount !== null && (
+                      <span className="text-xs text-emerald-600 font-medium">
+                        ₹{hourlyRate}/hr × {form.durationMinutes} min = ₹{autoAmount}
+                      </span>
+                    )}
+                    {isHourly && hourlyRate === 0 && form.studentId && (
+                      <span className="text-xs text-amber-500">Set hourly rate in Students page</span>
+                    )}
+                    {isMonthly && form.studentId && (
+                      <span className="text-xs text-slate-400">Monthly billing</span>
+                    )}
+                  </div>
+                  <input
+                    type="number"
+                    className="input"
+                    min={0}
+                    value={form.amount}
+                    onChange={(e) => setForm({ ...form, amount: Number(e.target.value) })}
+                    placeholder={autoAmount !== null ? `Auto: ₹${autoAmount}` : 'Enter amount'}
+                  />
+                </div>
+              </div>
+            )
+          })()}
 
           {editing && (
             <div>
