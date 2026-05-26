@@ -22,6 +22,23 @@ export const GRADES = [
 // All values that are NOT the free-text placeholder
 export const STANDARD_GRADES = GRADES.filter((g) => g !== 'Others')
 export const SUBJECTS = ['English', 'Mathematics', 'Science', 'Hindi', 'Social Studies', 'EVS', 'Computer', 'Other']
+export const EXAM_TYPES = ['Unit Test', 'Half Yearly', 'Final Exam', 'Board Exam', 'Practical', 'Oral', 'Project', 'Other']
+
+export interface Exam {
+  id: string
+  studentId: string
+  studentName: string
+  grade: string
+  board: Board
+  subject: string
+  examType: string       // Unit Test, Half Yearly, Board Exam, etc.
+  date: string           // YYYY-MM-DD
+  time?: string          // HH:MM (optional)
+  syllabus?: string      // topics to cover
+  venue?: string         // school / centre name
+  notes?: string
+  createdAt: Timestamp
+}
 
 export interface Student {
   id: string

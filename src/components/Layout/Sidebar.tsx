@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Users, CalendarDays, CreditCard,
-  FileText, BookOpen, BarChart2, LogOut, GraduationCap, Sparkles,
+  FileText, BookOpen, BarChart2, LogOut, GraduationCap, Sparkles, CalendarCheck,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import toast from 'react-hot-toast'
@@ -10,6 +10,7 @@ const nav = [
   { to: '/',          icon: LayoutDashboard, label: 'Dashboard'  },
   { to: '/students',  icon: Users,           label: 'Students'   },
   { to: '/schedule',  icon: CalendarDays,    label: 'Schedule'   },
+  { to: '/exams',     icon: CalendarCheck,   label: 'Exam Dates' },
   { to: '/billing',   icon: CreditCard,      label: 'Billing'    },
   { to: '/notes',     icon: FileText,        label: 'Notes'      },
   { to: '/content',   icon: BookOpen,        label: 'Content'    },

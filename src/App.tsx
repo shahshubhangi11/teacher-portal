@@ -11,6 +11,7 @@ import Notes from './pages/Notes'
 import Content from './pages/Content'
 import Reports from './pages/Reports'
 import AIInsights from './pages/AIInsights'
+import Exams from './pages/Exams'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
@@ -53,6 +54,7 @@ function AppRoutes() {
         <Route path="/content"  element={<Content />} />
         <Route path="/reports"    element={<Reports />} />
         <Route path="/ai"         element={<AIInsights />} />
+        <Route path="/exams"      element={<Exams />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
