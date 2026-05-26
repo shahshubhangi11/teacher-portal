@@ -8,7 +8,7 @@ import { useSessions } from '../hooks/useSessions'
 import { useStudents } from '../hooks/useStudents'
 import { useAuth } from '../contexts/AuthContext'
 import { Modal } from '../components/ui/Modal'
-import { sendSessionEmail } from '../lib/email'
+import { sendSessionEmail, SessionAction } from '../lib/email'
 import { Session, SUBJECTS } from '../types'
 import toast from 'react-hot-toast'
 
@@ -39,6 +39,8 @@ export default function Schedule() {
   const [form, setForm] = useState({ ...emptyForm })
   const [notifyParent, setNotifyParent] = useState(false)
   const [sendingEmail, setSendingEmail] = useState(false)
+  const [cancelConfirm, setCancelConfirm] = useState<Session | null>(null)
+  const [notifyOnCancel, setNotifyOnCancel] = useState(true)
 
   const days = useMemo(() => {
     const start = startOfMonth(currentMonth)
@@ -115,65 +117,67 @@ export default function Schedule() {
       durationMinutes: s.durationMinutes, status: s.status,
       notes: s.notes ?? '', amount: s.amount, billed: s.billed,
     })
+    setNotifyParent(false)
     setShowForm(true)
+  }
+
+  const buildEmailParams = (s: typeof form, action: SessionAction) => {
+    const student = students.find((st) => st.id === s.studentId)
+    const [h, m] = s.startTime.split(':')
+    const hNum = Number(h)
+    const ampm = hNum >= 12 ? 'PM' : 'AM'
+    const h12 = hNum % 12 || 12
+    return {
+      parentEmail:     student?.email ?? '',
+      parentName:      student?.parentName ?? '',
+      studentName:     student?.name ?? s.studentName,
+      subject:         s.subject,
+      date:            format(parseISO(s.date), 'EEEE, d MMMM yyyy'),
+      startTime:       `${h12}:${m} ${ampm}`,
+      durationMinutes: s.durationMinutes,
+      teacherName:     user?.displayName ?? 'Your Teacher',
+      teacherEmail:    user?.email ?? '',
+      notes:           s.notes,
+      action,
+    }
+  }
+
+  const trySendEmail = async (params: ReturnType<typeof buildEmailParams>) => {
+    const student = students.find((s) => s.id === form.studentId)
+    if (!student?.email) {
+      toast('⚠️ No parent email on file — email not sent', { icon: '⚠️' }); return
+    }
+    if (!import.meta.env.VITE_MAILER_URL) {
+      toast('Mailer not configured — add VITE_MAILER_URL to .env', { icon: '⚠️' }); return
+    }
+    setSendingEmail(true)
+    try {
+      await sendSessionEmail(params)
+      toast.success(`📧 Email sent to ${params.parentName}`)
+    } catch (e: any) {
+      toast.error('Email failed: ' + (e.message ?? 'unknown error'))
+    } finally {
+      setSendingEmail(false)
+    }
   }
 
   const handleSave = async () => {
     if (!form.studentId || !form.date || !form.startTime || !form.endTime) {
-      toast.error('Please fill all required fields')
-      return
+      toast.error('Please fill all required fields'); return
     }
     if (form.durationMinutes <= 0) {
-      toast.error('End time must be after start time')
-      return
+      toast.error('End time must be after start time'); return
     }
-    const student = students.find((s) => s.id === form.studentId)
     try {
       if (editing) {
         await updateSession(editing.id, form)
         toast.success('Session updated')
+        if (notifyParent) await trySendEmail(buildEmailParams(form, 'rescheduled'))
       } else {
         await addSession(form)
         toast.success('Session added')
+        if (notifyParent) await trySendEmail(buildEmailParams(form, 'scheduled'))
       }
-
-      // Send parent email if requested
-      if (notifyParent && !editing) {
-        if (!student?.email) {
-          toast('⚠️ No parent email on file for this student', { icon: '⚠️' })
-        } else if (!import.meta.env.VITE_MAILER_URL) {
-          toast('Mailer not configured — add VITE_MAILER_URL to .env', { icon: '⚠️' })
-        } else {
-          setSendingEmail(true)
-          try {
-            const [h, m] = form.startTime.split(':')
-            const hNum = Number(h)
-            const ampm = hNum >= 12 ? 'PM' : 'AM'
-            const h12 = hNum % 12 || 12
-            const friendlyTime = `${h12}:${m} ${ampm}`
-            const friendlyDate = format(parseISO(form.date), 'EEEE, d MMMM yyyy')
-
-            await sendSessionEmail({
-              parentEmail:     student.email,
-              parentName:      student.parentName,
-              studentName:     student.name,
-              subject:         form.subject,
-              date:            friendlyDate,
-              startTime:       friendlyTime,
-              durationMinutes: form.durationMinutes,
-              teacherName:     user?.displayName ?? 'Your Teacher',
-              teacherEmail:    user?.email ?? '',
-              notes:           form.notes,
-            })
-            toast.success(`📧 Email sent to ${student.parentName}`)
-          } catch (e: any) {
-            toast.error('Email failed: ' + (e.message ?? 'Check Gmail Script config'))
-          } finally {
-            setSendingEmail(false)
-          }
-        }
-      }
-
       setShowForm(false)
     } catch {
       toast.error('Something went wrong')
@@ -186,9 +190,36 @@ export default function Schedule() {
     toast.success('Session deleted')
   }
 
-  const handleStatus = async (id: string, status: Session['status']) => {
-    await updateSession(id, { status })
+  const handleStatus = async (session: Session, status: Session['status']) => {
+    await updateSession(session.id, { status })
     toast.success(`Marked as ${status}`)
+    if (status === 'cancelled') {
+      setCancelConfirm(session)   // opens notify dialog
+    }
+  }
+
+  const handleCancelEmailDismiss = () => setCancelConfirm(null)
+
+  const handleCancelEmailSend = async () => {
+    if (!cancelConfirm) return
+    const params = buildEmailParams(
+      {
+        studentId: cancelConfirm.studentId,
+        studentName: cancelConfirm.studentName,
+        subject: cancelConfirm.subject,
+        date: cancelConfirm.date,
+        startTime: cancelConfirm.startTime,
+        endTime: cancelConfirm.endTime,
+        durationMinutes: cancelConfirm.durationMinutes,
+        status: 'cancelled',
+        notes: cancelConfirm.notes ?? '',
+        amount: cancelConfirm.amount,
+        billed: cancelConfirm.billed,
+      },
+      'cancelled',
+    )
+    setCancelConfirm(null)
+    await trySendEmail(params)
   }
 
   const startOffset = getDay(days[0]) === 0 ? 6 : getDay(days[0]) - 1 // Mon-start
@@ -312,10 +343,10 @@ export default function Schedule() {
                     <StatusChip status={s.status} />
                     {s.status === 'scheduled' && (
                       <>
-                        <button onClick={() => handleStatus(s.id, 'completed')} className="text-xs text-green-600 hover:text-green-700 font-medium flex items-center gap-1">
+                        <button onClick={() => handleStatus(s, 'completed')} className="text-xs text-green-600 hover:text-green-700 font-medium flex items-center gap-1">
                           <CheckCircle size={12} /> Done
                         </button>
-                        <button onClick={() => handleStatus(s.id, 'cancelled')} className="text-xs text-red-500 hover:text-red-600 font-medium flex items-center gap-1">
+                        <button onClick={() => handleStatus(s, 'cancelled')} className="text-xs text-red-500 hover:text-red-600 font-medium flex items-center gap-1">
                           <XCircle size={12} /> Cancel
                         </button>
                       </>
@@ -416,31 +447,53 @@ export default function Schedule() {
             <textarea className="input resize-none" rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="What was covered..." />
           </div>
 
-          {/* Notify parent toggle (new sessions only) */}
-          {!editing && (
-            <label className="flex items-center gap-3 p-3 bg-indigo-50 border border-indigo-100 rounded-xl cursor-pointer hover:bg-indigo-100 transition-colors">
-              <input
-                type="checkbox"
-                checked={notifyParent}
-                onChange={(e) => setNotifyParent(e.target.checked)}
-                className="w-4 h-4 rounded accent-indigo-600"
-              />
-              <div>
-                <div className="text-sm font-medium text-indigo-800 flex items-center gap-2">
-                  <Mail size={14} /> Send class notification email to parent
-                </div>
-                <div className="text-xs text-indigo-500 mt-0.5">
-                  Requires parent email on student profile + Gmail script configured
-                </div>
+          {/* Notify parent toggle */}
+          <label className="flex items-center gap-3 p-3 bg-indigo-50 border border-indigo-100 rounded-xl cursor-pointer hover:bg-indigo-100 transition-colors">
+            <input
+              type="checkbox"
+              checked={notifyParent}
+              onChange={(e) => setNotifyParent(e.target.checked)}
+              className="w-4 h-4 rounded accent-indigo-600"
+            />
+            <div>
+              <div className="text-sm font-medium text-indigo-800 flex items-center gap-2">
+                <Mail size={14} />
+                {editing ? 'Notify parent of schedule change' : 'Send class notification email to parent'}
               </div>
-            </label>
-          )}
+              <div className="text-xs text-indigo-500 mt-0.5">
+                {editing
+                  ? 'Parent will receive a "Class Rescheduled" email'
+                  : 'Parent will receive a "Class Scheduled" email'}
+              </div>
+            </div>
+          </label>
 
           <div className="flex gap-3 pt-2">
             <button onClick={handleSave} disabled={sendingEmail} className="btn-primary flex-1">
-              {sendingEmail ? 'Sending email…' : editing ? 'Save Changes' : notifyParent ? 'Add & Notify Parent' : 'Add Session'}
+              {sendingEmail
+                ? 'Sending email…'
+                : editing
+                ? notifyParent ? 'Save & Notify Parent' : 'Save Changes'
+                : notifyParent ? 'Add & Notify Parent' : 'Add Session'}
             </button>
             <button onClick={() => setShowForm(false)} disabled={sendingEmail} className="btn-secondary">Cancel</button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Cancel notification dialog */}
+      <Modal open={!!cancelConfirm} onClose={handleCancelEmailDismiss} title="Session Cancelled">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            <strong>{cancelConfirm?.studentName}</strong>'s {cancelConfirm?.subject} class on{' '}
+            {cancelConfirm ? format(parseISO(cancelConfirm.date), 'EEE, d MMM') : ''} has been cancelled.
+          </p>
+          <p className="text-sm text-slate-700 font-medium">Notify the parent by email?</p>
+          <div className="flex gap-3">
+            <button onClick={handleCancelEmailSend} disabled={sendingEmail} className="btn-primary flex-1">
+              <Mail size={15} /> {sendingEmail ? 'Sending…' : 'Yes, Email Parent'}
+            </button>
+            <button onClick={handleCancelEmailDismiss} className="btn-secondary">No Thanks</button>
           </div>
         </div>
       </Modal>

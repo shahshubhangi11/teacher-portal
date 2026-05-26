@@ -30,6 +30,8 @@ async function send(to: string, subject: string, html: string, fromName?: string
 }
 
 // ── Session notification ─────────────────────────────────────────────────────
+export type SessionAction = 'scheduled' | 'rescheduled' | 'cancelled'
+
 export interface SessionEmailParams {
   parentEmail: string
   parentName: string
@@ -41,33 +43,53 @@ export interface SessionEmailParams {
   teacherName: string
   teacherEmail: string
   notes?: string
+  action?: SessionAction
 }
 
 export async function sendSessionEmail(p: SessionEmailParams) {
+  const action = p.action ?? 'scheduled'
+
+  const meta: Record<SessionAction, { emoji: string; title: string; color: string; intro: string }> = {
+    scheduled:   { emoji: '📚', title: 'Class Scheduled',    color: '#4f46e5', intro: 'A class has been scheduled' },
+    rescheduled: { emoji: '🔄', title: 'Class Rescheduled',  color: '#d97706', intro: 'A class has been rescheduled' },
+    cancelled:   { emoji: '❌', title: 'Class Cancelled',    color: '#dc2626', intro: 'A class has been cancelled' },
+  }
+  const { emoji, title, color, intro } = meta[action]
+
+  const detailRows = action !== 'cancelled' ? `
+    <tr><td style="padding:10px 12px;color:#64748b">📚 Subject</td><td style="padding:10px 12px;font-weight:600">${p.subject}</td></tr>
+    <tr style="background:#f1f5f9"><td style="padding:10px 12px;color:#64748b">📅 Date</td><td style="padding:10px 12px;font-weight:600">${p.date}</td></tr>
+    <tr><td style="padding:10px 12px;color:#64748b">⏰ Time</td><td style="padding:10px 12px;font-weight:600">${p.startTime}&nbsp;(${p.durationMinutes} min)</td></tr>
+    <tr style="background:#f1f5f9"><td style="padding:10px 12px;color:#64748b">📝 Notes</td><td style="padding:10px 12px">${p.notes || 'None'}</td></tr>
+  ` : `
+    <tr><td style="padding:10px 12px;color:#64748b">📚 Subject</td><td style="padding:10px 12px;font-weight:600">${p.subject}</td></tr>
+    <tr style="background:#f1f5f9"><td style="padding:10px 12px;color:#64748b">📅 Was scheduled for</td><td style="padding:10px 12px;font-weight:600">${p.date} at ${p.startTime}</td></tr>
+    ${p.notes ? `<tr><td style="padding:10px 12px;color:#64748b">📝 Reason</td><td style="padding:10px 12px">${p.notes}</td></tr>` : ''}
+  `
+
   const html = `
 <div style="font-family:sans-serif;max-width:520px;margin:auto">
-  <div style="background:#4f46e5;color:white;padding:20px 24px;border-radius:10px 10px 0 0">
-    <h2 style="margin:0">Class Scheduled 📚</h2>
+  <div style="background:${color};color:white;padding:20px 24px;border-radius:10px 10px 0 0">
+    <h2 style="margin:0">${title} ${emoji}</h2>
   </div>
   <div style="background:#f8fafc;padding:24px;border-radius:0 0 10px 10px;border:1px solid #e2e8f0">
     <p>Dear <strong>${p.parentName}</strong>,</p>
-    <p>A class has been scheduled for <strong>${p.studentName}</strong>.</p>
+    <p>${intro} for <strong>${p.studentName}</strong>.</p>
     <table style="width:100%;border-collapse:collapse;margin:16px 0;background:white;border:1px solid #e2e8f0;border-radius:8px">
-      <tr><td style="padding:10px 12px;color:#64748b">📚 Subject</td><td style="padding:10px 12px;font-weight:600">${p.subject}</td></tr>
-      <tr style="background:#f1f5f9"><td style="padding:10px 12px;color:#64748b">📅 Date</td><td style="padding:10px 12px;font-weight:600">${p.date}</td></tr>
-      <tr><td style="padding:10px 12px;color:#64748b">⏰ Time</td><td style="padding:10px 12px;font-weight:600">${p.startTime}&nbsp; (${p.durationMinutes} min)</td></tr>
-      <tr style="background:#f1f5f9"><td style="padding:10px 12px;color:#64748b">📝 Notes</td><td style="padding:10px 12px">${p.notes || 'None'}</td></tr>
+      ${detailRows}
     </table>
     <p style="color:#64748b;font-size:13px">For queries: <a href="mailto:${p.teacherEmail}">${p.teacherEmail}</a></p>
     <p style="margin-top:16px">Regards,<br><strong>${p.teacherName}</strong></p>
   </div>
 </div>`
-  await send(
-    p.parentEmail,
-    `Class Scheduled – ${p.studentName} on ${p.date}`,
-    html,
-    p.teacherName,
-  )
+
+  const subjects: Record<SessionAction, string> = {
+    scheduled:   `Class Scheduled – ${p.studentName} on ${p.date}`,
+    rescheduled: `Class Rescheduled – ${p.studentName} on ${p.date}`,
+    cancelled:   `Class Cancelled – ${p.studentName} on ${p.date}`,
+  }
+
+  await send(p.parentEmail, subjects[action], html, p.teacherName)
 }
 
 // ── Progress report ──────────────────────────────────────────────────────────
