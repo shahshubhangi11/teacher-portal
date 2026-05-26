@@ -183,36 +183,64 @@ export interface BillingEmailParams {
 }
 
 export async function sendBillingEmail(p: BillingEmailParams) {
-  const upi = p.upiId || UPI_ID || 'Contact teacher for payment details'
+  const upi = p.upiId || UPI_ID || ''
+
+  // UPI deep-link: scanning this QR opens any UPI app pre-filled with amount
+  const upiLink = upi
+    ? `upi://pay?pa=${encodeURIComponent(upi)}&pn=${encodeURIComponent(p.teacherName)}&am=${p.amount}&cu=INR&tn=${encodeURIComponent(`Tuition ${p.period}`)}`
+    : ''
+
+  // QR code image generated on-the-fly by qrserver.com (free, no auth needed)
+  const qrUrl = upiLink
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=10&data=${encodeURIComponent(upiLink)}`
+    : ''
+
+  const paymentSection = upi ? `
+    <div style="background:#fefce8;border:1px solid #fde68a;border-radius:12px;padding:20px;margin:20px 0;text-align:center">
+      <p style="margin:0 0 4px;font-weight:700;color:#92400e;font-size:15px">💳 Pay via UPI</p>
+      <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:#1e293b;letter-spacing:.5px">${upi}</p>
+      ${qrUrl ? `
+      <img src="${qrUrl}" alt="UPI QR Code" width="180" height="180"
+           style="display:block;margin:0 auto 12px;border-radius:8px;border:1px solid #fde68a" />
+      <p style="margin:0;font-size:12px;color:#92400e">Scan with any UPI app (GPay, PhonePe, Paytm…)</p>
+      ` : ''}
+    </div>` : `
+    <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:14px;margin:16px 0">
+      <p style="margin:0;color:#92400e">Contact teacher for payment details: <a href="mailto:${p.teacherEmail}">${p.teacherEmail}</a></p>
+    </div>`
+
   const html = `
 <div style="font-family:sans-serif;max-width:520px;margin:auto">
   <div style="background:#4f46e5;color:white;padding:20px 24px;border-radius:10px 10px 0 0">
-    <h2 style="margin:0">Invoice 🧾</h2>
-    <p style="margin:4px 0 0;opacity:.8">${p.invoiceNumber}</p>
+    <h2 style="margin:0">Monthly Fee Statement 🧾</h2>
+    <p style="margin:4px 0 0;opacity:.8">${p.period} &middot; ${p.invoiceNumber}</p>
   </div>
   <div style="background:#f8fafc;padding:24px;border-radius:0 0 10px 10px;border:1px solid #e2e8f0">
     <p>Dear <strong>${p.parentName}</strong>,</p>
-    <p>Please find the invoice for <strong>${p.studentName}</strong>'s tutoring.</p>
+    <p>Please find the monthly fee statement for <strong>${p.studentName}</strong>'s tutoring sessions.</p>
+
     <table style="width:100%;border-collapse:collapse;margin:16px 0;background:white;border:1px solid #e2e8f0;border-radius:8px">
-      <tr><td style="padding:10px 12px;color:#64748b">Period</td><td style="padding:10px 12px;font-weight:600">${p.period}</td></tr>
-      <tr style="background:#f1f5f9"><td style="padding:10px 12px;color:#64748b">Sessions</td><td style="padding:10px 12px;font-weight:600">${p.totalSessions} classes &middot; ${p.totalHours} hrs</td></tr>
-      <tr><td style="padding:10px 12px;color:#64748b">Due Date</td><td style="padding:10px 12px;font-weight:600">${p.dueDate || 'As soon as possible'}</td></tr>
+      <tr><td style="padding:10px 12px;color:#64748b">Month / Period</td><td style="padding:10px 12px;font-weight:600">${p.period}</td></tr>
+      <tr style="background:#f1f5f9"><td style="padding:10px 12px;color:#64748b">Total Sessions</td><td style="padding:10px 12px;font-weight:600">${p.totalSessions} classes &middot; ${p.totalHours} hrs</td></tr>
+      <tr><td style="padding:10px 12px;color:#64748b">Due By</td><td style="padding:10px 12px;font-weight:600">${p.dueDate || '7 days from receipt'}</td></tr>
       <tr style="background:#4f46e5;color:white">
-        <td style="padding:13px 12px;font-weight:700">Total Amount</td>
-        <td style="padding:13px 12px;font-size:20px;font-weight:700">&#8377;${p.amount.toLocaleString()}</td>
+        <td style="padding:14px 12px;font-weight:700;font-size:15px">Total Amount Due</td>
+        <td style="padding:14px 12px;font-size:22px;font-weight:700">&#8377;${p.amount.toLocaleString()}</td>
       </tr>
     </table>
-    <div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:14px;margin:16px 0">
-      <p style="margin:0;font-weight:600;color:#92400e">💳 Pay via UPI</p>
-      <p style="margin:6px 0 0;font-size:17px;font-weight:700;color:#1e293b;letter-spacing:.5px">${upi}</p>
-    </div>
-    <p style="color:#64748b;font-size:13px">For queries: <a href="mailto:${p.teacherEmail}">${p.teacherEmail}</a></p>
-    <p style="margin-top:16px">Thank you!<br><strong>${p.teacherName}</strong></p>
+
+    ${paymentSection}
+
+    <p style="color:#64748b;font-size:13px;margin-top:16px">
+      For queries contact ${p.teacherName}: <a href="mailto:${p.teacherEmail}">${p.teacherEmail}</a>
+    </p>
+    <p style="margin-top:12px">Thank you!<br><strong>${p.teacherName}</strong></p>
   </div>
 </div>`
+
   await send(
     p.parentEmail,
-    `Invoice ${p.invoiceNumber} – ₹${p.amount.toLocaleString()} Due`,
+    `Monthly Fee – ${p.studentName} (${p.period}) ₹${p.amount.toLocaleString()}`,
     html,
     p.teacherName,
   )

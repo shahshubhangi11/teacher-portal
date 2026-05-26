@@ -288,7 +288,7 @@ export default function Billing() {
                     {emailingId === r.id
                       ? <span className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin inline-block" />
                       : <Mail size={14} />}
-                    {emailingId === r.id ? 'Sending…' : 'Email'}
+                    {emailingId === r.id ? 'Sending…' : 'Send Bill'}
                   </button>
                   <button onClick={() => handleDelete(r.id)} className="p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500">
                     <Trash2 size={14} />
