@@ -63,6 +63,58 @@ Return ONLY a valid JSON array — no markdown, no explanation, no extra text:
   return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
 }
 
+// ── Generate from uploaded PDF ─────────────────────────────────
+export async function generateFromPDF(
+  pdfUrl: string,
+  params: QuizGenParams,
+): Promise<Question[]> {
+  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
+
+  // Fetch the PDF and convert to base64 so Gemini can read it inline
+  const res = await fetch(pdfUrl)
+  if (!res.ok) throw new Error('Could not fetch the PDF. Make sure it is publicly accessible.')
+  const buf = await res.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  // Build base64 in chunks to avoid call-stack overflow on large files
+  let binary = ''
+  const chunk = 8192
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...Array.from(bytes.subarray(i, i + chunk)))
+  }
+  const base64 = btoa(binary)
+
+  const prompt = `
+You are an expert Indian school teacher. Read the attached PDF study material carefully.
+Create exactly ${params.numQuestions} questions based on the content of this PDF for:
+- Subject: ${params.subject}
+- Grade/Standard: ${params.grade}
+- Board: ${params.board}
+- Difficulty: ${params.difficulty}
+- Question types: ${params.questionTypes.join(', ')}
+
+Rules:
+- Base ALL questions strictly on the content of the PDF — no outside knowledge.
+- Distribute questions evenly across the requested types.
+- For "mcq": exactly 4 options; "answer" = full text of correct option.
+- For "short": "answer" = 1–2 sentence expected answer.
+- For "fill": question must contain "_____"; "answer" = missing word/phrase.
+- For "long": "answer" = key points (3–5 bullet points).
+- Marks: mcq=1, short=2, fill=1, long=4
+
+Return ONLY a valid JSON array — no markdown, no explanation:
+[{"id":"1","text":"...","type":"mcq","options":["A","B","C","D"],"answer":"A","marks":1}]
+`.trim()
+
+  const result = await model.generateContent([
+    { inlineData: { mimeType: 'application/pdf', data: base64 } },
+    { text: prompt },
+  ])
+  const raw = result.response.text().trim()
+  const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
+  const parsed: Question[] = JSON.parse(jsonStr)
+  return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
+}
+
 // ── Student Insights ────────────────────────────────────────────
 export interface InsightsData {
   totalStudents: number

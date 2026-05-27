@@ -4,7 +4,7 @@ import {
   FileText, Brain, PenTool, Type, Search,
   Upload, Download, File, X, Loader2, Sparkles,
 } from 'lucide-react'
-import { generateQuiz } from '../lib/ai'
+import { generateQuiz, generateFromPDF } from '../lib/ai'
 import { useAuth } from '../contexts/AuthContext'
 import { useContent } from '../hooks/useContent'
 import { useStudents } from '../hooks/useStudents'
@@ -80,7 +80,7 @@ export default function Content() {
     }
     setIsGenerating(true)
     try {
-      const questions = await generateQuiz({
+      const params = {
         topic:         genSource.title,
         subject:       genSource.subject,
         grade:         genSource.grade === 'All' ? '6' : genSource.grade,
@@ -89,7 +89,13 @@ export default function Content() {
         numQuestions:  genNumQ,
         questionTypes: genQTypes,
         context:       genContext.trim() || genSource.body || genSource.description || genSource.title,
-      })
+      }
+
+      // Use PDF reading if the source has an uploaded PDF, otherwise use text context
+      const questions = genSource.fileUrl
+        ? await generateFromPDF(genSource.fileUrl, params)
+        : await generateQuiz(params)
+
       const totalMarks = questions.reduce((s, q) => s + q.marks, 0)
       const label = genOutputType === 'worksheet' ? 'Worksheet' : genOutputType === 'quiz' ? 'Quiz' : 'Exam Paper'
       await addContent({
@@ -576,9 +582,13 @@ export default function Content() {
       <Modal open={!!genSource} onClose={() => !isGenerating && setGenSource(null)} title="Generate with AI ✨" size="lg">
         {genSource && (
           <div className="space-y-4">
-            <div className="flex items-center gap-2 px-3 py-2 bg-indigo-50 rounded-xl text-sm text-indigo-700">
+            <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm ${genSource.fileUrl ? 'bg-green-50 text-green-700' : 'bg-indigo-50 text-indigo-700'}`}>
               <Sparkles size={14} className="flex-shrink-0" />
-              <span>Generating from: <strong>{genSource.title}</strong></span>
+              <span>
+                {genSource.fileUrl
+                  ? <>📄 AI will <strong>read the uploaded PDF</strong> and generate from its content</>
+                  : <>Generating from: <strong>{genSource.title}</strong></>}
+              </span>
             </div>
 
             {/* Output type */}
@@ -633,17 +643,19 @@ export default function Content() {
               </div>
             </div>
 
-            {/* Context / extra notes */}
-            <div>
-              <label className="label">Study Material / Context <span className="text-slate-400 font-normal">(edit or paste chapter notes)</span></label>
-              <textarea
-                className="input resize-none text-xs"
-                rows={4}
-                value={genContext}
-                onChange={e => setGenContext(e.target.value)}
-                placeholder="Paste chapter text, key points, or definitions here to make questions more accurate…"
-              />
-            </div>
+            {/* Context / extra notes — only shown if no PDF */}
+            {!genSource.fileUrl && (
+              <div>
+                <label className="label">Study Material / Context <span className="text-slate-400 font-normal">(edit or paste chapter notes)</span></label>
+                <textarea
+                  className="input resize-none text-xs"
+                  rows={4}
+                  value={genContext}
+                  onChange={e => setGenContext(e.target.value)}
+                  placeholder="Paste chapter text, key points, or definitions here to make questions more accurate…"
+                />
+              </div>
+            )}
 
             <div className="flex gap-3 pt-1">
               <button
