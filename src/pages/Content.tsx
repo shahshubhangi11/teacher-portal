@@ -625,7 +625,7 @@ export default function Content() {
                 <div>
                   <Upload size={24} className="text-slate-300 mx-auto mb-2" />
                   <p className="text-sm text-slate-500">Click to select a PDF file</p>
-                  <p className="text-xs text-slate-400 mt-0.5">PDF files only · Max 10 MB</p>
+                  <p className="text-xs text-slate-400 mt-0.5">PDF files only · Max 20 MB</p>
                 </div>
               )}
             </div>
@@ -634,7 +634,15 @@ export default function Content() {
               type="file"
               accept=".pdf"
               className="hidden"
-              onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => {
+                const file = e.target.files?.[0] ?? null
+                if (file && file.size > 20 * 1024 * 1024) {
+                  toast.error('File too large — max 20 MB. Please compress the PDF first.')
+                  e.target.value = ''
+                  return
+                }
+                setSelectedFile(file)
+              }}
             />
           </div>
 
