@@ -2,8 +2,9 @@ import { useState, useMemo, useRef } from 'react'
 import {
   Plus, BookOpen, Edit2, Trash2, Eye, Printer,
   FileText, Brain, PenTool, Type, Search,
-  Upload, Download, File, X, Loader2,
+  Upload, Download, File, X, Loader2, Sparkles,
 } from 'lucide-react'
+import { generateQuiz } from '../lib/ai'
 import { useAuth } from '../contexts/AuthContext'
 import { useContent } from '../hooks/useContent'
 import { useStudents } from '../hooks/useStudents'
@@ -60,6 +61,60 @@ export default function Content() {
   const [studentFilter, setStudentFilter] = useState<string>('All')
   const [search, setSearch] = useState('')
   const [gradeOther, setGradeOther] = useState('')
+
+  // Generate from material
+  const [genSource, setGenSource]       = useState<Content | null>(null)
+  const [genOutputType, setGenOutputType] = useState<'worksheet' | 'quiz' | 'test'>('quiz')
+  const [genDifficulty, setGenDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium')
+  const [genNumQ, setGenNumQ]           = useState(5)
+  const [genQTypes, setGenQTypes]       = useState<('mcq'|'short'|'fill'|'long')[]>(['mcq','short'])
+  const [genContext, setGenContext]     = useState('')
+  const [isGenerating, setIsGenerating] = useState(false)
+
+  const toggleGenQType = (t: 'mcq'|'short'|'fill'|'long') =>
+    setGenQTypes(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
+
+  const handleGenerate = async () => {
+    if (!genSource || genQTypes.length === 0) {
+      toast.error('Select at least one question type'); return
+    }
+    setIsGenerating(true)
+    try {
+      const questions = await generateQuiz({
+        topic:         genSource.title,
+        subject:       genSource.subject,
+        grade:         genSource.grade === 'All' ? '6' : genSource.grade,
+        board:         genSource.board === 'All' ? 'CBSE' : String(genSource.board),
+        difficulty:    genDifficulty,
+        numQuestions:  genNumQ,
+        questionTypes: genQTypes,
+        context:       genContext.trim() || genSource.body || genSource.description || genSource.title,
+      })
+      const totalMarks = questions.reduce((s, q) => s + q.marks, 0)
+      const label = genOutputType === 'worksheet' ? 'Worksheet' : genOutputType === 'quiz' ? 'Quiz' : 'Exam Paper'
+      await addContent({
+        title:       `${genSource.title} — ${label}`,
+        type:        genOutputType,
+        board:       genSource.board,
+        grade:       genSource.grade,
+        subject:     genSource.subject,
+        description: `AI-generated from "${genSource.title}"`,
+        body: '', questions, totalMarks,
+        duration:    genOutputType === 'test' ? 60 : 30,
+        tags: [], forLD: genSource.forLD ?? false,
+        fileUrl: '', fileName: '', fileSize: 0,
+        studentId:   genSource.studentId ?? '',
+        studentName: genSource.studentName ?? '',
+      })
+      toast.success(`${label} created and saved to Content Library! ✅`)
+      setGenSource(null)
+    } catch (e: any) {
+      toast.error(e?.message ?? 'Generation failed')
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
   const [uploading, setUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -409,6 +464,11 @@ export default function Content() {
                     {item.description && <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{item.description}</p>}
                   </div>
                   <div className="flex gap-1 flex-shrink-0">
+                    <button
+                      onClick={() => { setGenSource(item); setGenContext(item.body ?? ''); setGenOutputType('quiz'); setGenDifficulty('medium'); setGenNumQ(5); setGenQTypes(['mcq','short']) }}
+                      title="Generate worksheet / quiz / exam from this"
+                      className="p-1.5 hover:bg-purple-50 rounded-lg text-slate-400 hover:text-purple-600"
+                    ><Sparkles size={13} /></button>
                     <button onClick={() => setViewing(item)} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600"><Eye size={13} /></button>
                     <button onClick={() => openEdit(item)} className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600"><Edit2 size={13} /></button>
                     <button onClick={() => handleDelete(item)} className="p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500"><Trash2 size={13} /></button>
@@ -499,9 +559,104 @@ export default function Content() {
                 )}
               </div>
             ))}
-            {!viewing.fileUrl && (
-              <button onClick={() => printContent(viewing)} className="btn-primary mt-2"><Printer size={16} /> Export PDF</button>
-            )}
+            <div className="flex gap-2 mt-2">
+              {!viewing.fileUrl && (
+                <button onClick={() => printContent(viewing)} className="btn-secondary"><Printer size={16} /> Export PDF</button>
+              )}
+              <button
+                onClick={() => { setViewing(null); setGenSource(viewing); setGenContext(viewing.body ?? ''); setGenOutputType('quiz'); setGenDifficulty('medium'); setGenNumQ(5); setGenQTypes(['mcq','short']) }}
+                className="btn-primary"
+              ><Sparkles size={16} /> Generate from this</button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── Generate from Material Modal ── */}
+      <Modal open={!!genSource} onClose={() => !isGenerating && setGenSource(null)} title="Generate with AI ✨" size="lg">
+        {genSource && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 px-3 py-2 bg-indigo-50 rounded-xl text-sm text-indigo-700">
+              <Sparkles size={14} className="flex-shrink-0" />
+              <span>Generating from: <strong>{genSource.title}</strong></span>
+            </div>
+
+            {/* Output type */}
+            <div>
+              <label className="label">Output Type</label>
+              <div className="grid grid-cols-3 gap-2">
+                {([['worksheet','Worksheet','📝'],['quiz','Quiz','🧠'],['test','Exam Paper','📋']] as const).map(([val, label, icon]) => (
+                  <button key={val} type="button"
+                    onClick={() => setGenOutputType(val)}
+                    className={`py-2 rounded-xl border text-sm font-medium transition-all ${genOutputType === val ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}`}
+                  >{icon} {label}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* Difficulty + Questions */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="label">Difficulty</label>
+                <div className="flex gap-2">
+                  {(['easy','medium','hard'] as const).map(d => (
+                    <button key={d} type="button"
+                      onClick={() => setGenDifficulty(d)}
+                      className={`flex-1 py-1.5 rounded-lg border text-xs font-medium capitalize transition-all ${genDifficulty === d ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}`}
+                    >{d}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="label">No. of Questions</label>
+                <div className="flex gap-2">
+                  {[5, 8, 10, 15].map(n => (
+                    <button key={n} type="button"
+                      onClick={() => setGenNumQ(n)}
+                      className={`flex-1 py-1.5 rounded-lg border text-xs font-medium transition-all ${genNumQ === n ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}`}
+                    >{n}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Question types */}
+            <div>
+              <label className="label">Question Types</label>
+              <div className="flex flex-wrap gap-2">
+                {([['mcq','Multiple Choice'],['short','Short Answer'],['fill','Fill in Blank'],['long','Long Answer']] as const).map(([val, label]) => (
+                  <button key={val} type="button"
+                    onClick={() => toggleGenQType(val)}
+                    className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${genQTypes.includes(val) ? 'bg-indigo-100 text-indigo-700 border-indigo-300' : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-200'}`}
+                  >{genQTypes.includes(val) ? '✓ ' : ''}{label}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* Context / extra notes */}
+            <div>
+              <label className="label">Study Material / Context <span className="text-slate-400 font-normal">(edit or paste chapter notes)</span></label>
+              <textarea
+                className="input resize-none text-xs"
+                rows={4}
+                value={genContext}
+                onChange={e => setGenContext(e.target.value)}
+                placeholder="Paste chapter text, key points, or definitions here to make questions more accurate…"
+              />
+            </div>
+
+            <div className="flex gap-3 pt-1">
+              <button
+                onClick={handleGenerate}
+                disabled={isGenerating || genQTypes.length === 0}
+                className="btn-primary flex-1"
+              >
+                {isGenerating
+                  ? <><Loader2 size={15} className="animate-spin" /> Generating…</>
+                  : <><Sparkles size={15} /> Generate & Save to Library</>}
+              </button>
+              <button onClick={() => setGenSource(null)} disabled={isGenerating} className="btn-secondary">Cancel</button>
+            </div>
           </div>
         )}
       </Modal>
