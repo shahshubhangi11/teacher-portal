@@ -1,11 +1,9 @@
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo } from 'react'
 import {
   Plus, BookOpen, Edit2, Trash2, Eye, Printer,
-  FileText, Brain, PenTool, Calculator, Type, Search,
-  Upload, Download, File, X, Loader2,
+  FileText, Brain, PenTool, Type, Search,
+  Download, File, Link,
 } from 'lucide-react'
-import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage'
-import { storage } from '../lib/firebase'
 import { useAuth } from '../contexts/AuthContext'
 import { useContent } from '../hooks/useContent'
 import { useStudents } from '../hooks/useStudents'
@@ -27,7 +25,7 @@ const MAIN_TABS: { id: MainTab; label: string; icon: React.ReactNode }[] = [
   { id: 'test',           label: 'Tests',         icon: <Type size={15} /> },
   { id: 'writing-skills', label: 'Writing Skills',icon: <PenTool size={15} /> },
   { id: 'ld-material',    label: 'LD Materials',  icon: <Brain size={15} /> },
-  { id: 'student-pdfs',   label: 'Student PDFs',  icon: <Upload size={15} /> },
+  { id: 'student-pdfs',   label: 'Student PDFs',  icon: <Link size={15} /> },
 ]
 
 const WORKSHEET_SUBS: { id: WorksheetSub; label: string }[] = [
@@ -62,10 +60,6 @@ export default function Content() {
   const [studentFilter, setStudentFilter] = useState<string>('All')
   const [search, setSearch] = useState('')
   const [gradeOther, setGradeOther] = useState('')
-  const [uploading, setUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState(0)
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
 
   const activeTypes = useMemo((): ContentType[] => {
     if (mainTab === 'student-pdfs') return ['grammar-worksheet','maths-practice','worksheet','study-material','quiz','test','writing-skills','ld-material']
@@ -93,7 +87,6 @@ export default function Content() {
     setEditing(null)
     const defaultType: ContentType = mainTab === 'worksheet' ? worksheetSub : mainTab === 'student-pdfs' ? 'study-material' : mainTab
     setForm({ ...emptyForm, type: defaultType })
-    setSelectedFile(null)
     setGradeOther('')
     setShowForm(true)
   }
@@ -112,25 +105,7 @@ export default function Content() {
       fileSize: item.fileSize ?? 0,
       studentId: item.studentId ?? '', studentName: item.studentName ?? '',
     })
-    setSelectedFile(null)
     setShowForm(true)
-  }
-
-  const uploadFileToStorage = async (file: File): Promise<{ url: string; name: string; size: number }> => {
-    return new Promise((resolve, reject) => {
-      const path = `users/${user!.uid}/pdfs/${Date.now()}_${file.name}`
-      const storageRef = ref(storage, path)
-      const task = uploadBytesResumable(storageRef, file)
-      task.on(
-        'state_changed',
-        (snap) => setUploadProgress(Math.round((snap.bytesTransferred / snap.totalBytes) * 100)),
-        reject,
-        async () => {
-          const url = await getDownloadURL(task.snapshot.ref)
-          resolve({ url, name: file.name, size: file.size })
-        }
-      )
-    })
   }
 
   const handleSave = async () => {
@@ -139,17 +114,14 @@ export default function Content() {
       toast.error('Please specify the grade / standard')
       return
     }
+    // Basic URL validation if a Drive link is provided
+    if (form.fileUrl && !form.fileUrl.startsWith('http')) {
+      toast.error('Please enter a valid URL starting with https://'); return
+    }
     try {
-      setUploading(true)
-      let fileData: Partial<Content> = {}
-      if (selectedFile) {
-        const { url, name, size } = await uploadFileToStorage(selectedFile)
-        fileData = { fileUrl: url, fileName: name, fileSize: size }
-      }
       const payload = {
         ...form,
         grade: form.grade === 'Others' ? gradeOther.trim() : form.grade,
-        ...fileData,
       }
       if (editing) {
         await updateContent(editing.id, payload)
@@ -159,25 +131,14 @@ export default function Content() {
         toast.success('Created')
       }
       setShowForm(false)
-      setSelectedFile(null)
     } catch (e) {
-      toast.error('Upload failed — check Firebase Storage is enabled')
+      toast.error('Something went wrong')
       console.error(e)
-    } finally {
-      setUploading(false)
-      setUploadProgress(0)
     }
   }
 
   const handleDelete = async (item: Content) => {
     if (!confirm(`Delete "${item.title}"?`)) return
-    // Delete storage file if present
-    if (item.fileUrl) {
-      try {
-        const fileRef = ref(storage, item.fileUrl)
-        await deleteObject(fileRef).catch(() => {}) // ignore if already deleted
-      } catch {}
-    }
     await deleteContent(item.id)
     toast.success('Deleted')
   }
@@ -263,7 +224,7 @@ export default function Content() {
           <p className="text-slate-500 text-sm mt-0.5">{items.length} total items · {items.filter(i => i.fileUrl).length} PDFs uploaded</p>
         </div>
         <button onClick={openAdd} className="btn-primary">
-          <Plus size={16} /> {isPDFTab ? 'Upload PDF' : 'Create'}
+          <Plus size={16} /> {isPDFTab ? 'Add PDF Link' : 'Create'}
         </button>
       </div>
 
@@ -327,10 +288,10 @@ export default function Content() {
       {isPDFTab ? (
         filtered.length === 0 ? (
           <div className="card text-center py-16">
-            <Upload size={40} className="text-slate-200 mx-auto mb-3" />
-            <p className="text-slate-500 font-medium mb-1">No PDFs uploaded yet</p>
-            <p className="text-slate-400 text-sm mb-4">Upload study material, worksheets or notes as PDF for each student</p>
-            <button onClick={openAdd} className="btn-primary btn-sm"><Plus size={14} /> Upload PDF</button>
+            <File size={40} className="text-slate-200 mx-auto mb-3" />
+            <p className="text-slate-500 font-medium mb-1">No PDF links added yet</p>
+            <p className="text-slate-400 text-sm mb-4">Share Google Drive PDFs with students — just paste the link</p>
+            <button onClick={openAdd} className="btn-primary btn-sm"><Plus size={14} /> Add PDF Link</button>
           </div>
         ) : (
           <div className="space-y-3">
@@ -498,7 +459,7 @@ export default function Content() {
       </Modal>
 
       {/* Create/Edit Modal */}
-      <Modal open={showForm} onClose={() => setShowForm(false)} title={editing ? 'Edit Content' : isPDFTab ? 'Upload PDF' : 'Create Content'} size="xl">
+      <Modal open={showForm} onClose={() => setShowForm(false)} title={editing ? 'Edit Content' : isPDFTab ? 'Add PDF Link' : 'Create Content'} size="xl">
         <div className="space-y-4">
           <div>
             <label className="label">Title *</label>
@@ -586,60 +547,39 @@ export default function Content() {
             <input className="input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Brief description..." />
           </div>
 
-          {/* PDF Upload */}
+          {/* Google Drive Link */}
           <div>
-            <label className="label">Upload PDF {isPDFTab ? '*' : '(optional)'}</label>
-            <div
-              onClick={() => fileRef.current?.click()}
-              className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-colors
-                ${selectedFile ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}
-            >
-              {selectedFile ? (
-                <div className="flex items-center justify-center gap-3">
-                  <File size={20} className="text-indigo-500" />
-                  <div className="text-left">
-                    <div className="text-sm font-medium text-slate-800">{selectedFile.name}</div>
-                    <div className="text-xs text-slate-500">{(selectedFile.size / 1024).toFixed(0)} KB</div>
-                  </div>
-                  <button type="button" onClick={(e) => { e.stopPropagation(); setSelectedFile(null) }}
-                    className="ml-auto p-1 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500">
-                    <X size={14} />
-                  </button>
-                </div>
-              ) : form.fileName ? (
-                <div className="flex items-center justify-center gap-3">
-                  <File size={20} className="text-red-500" />
-                  <div className="text-sm text-slate-600">Current: {form.fileName}</div>
-                  <span className="text-xs text-indigo-500 ml-2">Click to replace</span>
-                </div>
-              ) : (
-                <div>
-                  <Upload size={24} className="text-slate-300 mx-auto mb-2" />
-                  <p className="text-sm text-slate-500">Click to select a PDF file</p>
-                  <p className="text-xs text-slate-400 mt-0.5">PDF files only · Max 10 MB</p>
-                </div>
-              )}
+            <label className="label">
+              Google Drive Link {isPDFTab ? '*' : '(optional)'}
+            </label>
+            <div className="relative">
+              <Link size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                className="input pl-9"
+                value={form.fileUrl}
+                onChange={(e) => setForm({ ...form, fileUrl: e.target.value })}
+                placeholder="https://drive.google.com/file/d/…/view?usp=sharing"
+              />
             </div>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".pdf"
-              className="hidden"
-              onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
-            />
+            <p className="text-xs text-slate-400 mt-1.5 flex items-start gap-1">
+              <span>💡</span>
+              <span>
+                In Google Drive: right-click the file → <strong>Share</strong> → set access to
+                <strong> "Anyone with the link"</strong> → Copy link → paste above.
+              </span>
+            </p>
           </div>
 
-          {uploading && (
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 text-sm text-slate-600">
-                <Loader2 size={14} className="animate-spin text-indigo-500" />
-                Uploading… {uploadProgress}%
-              </div>
-              <div className="w-full bg-slate-200 rounded-full h-1.5">
-                <div className="bg-indigo-600 h-1.5 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
-              </div>
-            </div>
-          )}
+          {/* Optional display name */}
+          <div>
+            <label className="label">File Name (optional)</label>
+            <input
+              className="input"
+              value={form.fileName}
+              onChange={(e) => setForm({ ...form, fileName: e.target.value })}
+              placeholder="e.g. Chapter 3 Notes.pdf"
+            />
+          </div>
 
           {!isQnA && !isPDFTab && (
             <div>
@@ -707,10 +647,10 @@ export default function Content() {
           )}
 
           <div className="flex gap-3 pt-2">
-            <button onClick={handleSave} disabled={uploading} className="btn-primary flex-1">
-              {uploading ? <><Loader2 size={15} className="animate-spin" /> Uploading…</> : editing ? 'Save Changes' : isPDFTab ? 'Upload & Save' : 'Create Content'}
+            <button onClick={handleSave} className="btn-primary flex-1">
+              {editing ? 'Save Changes' : isPDFTab ? 'Save PDF Link' : 'Create Content'}
             </button>
-            <button onClick={() => setShowForm(false)} disabled={uploading} className="btn-secondary">Cancel</button>
+            <button onClick={() => setShowForm(false)} className="btn-secondary">Cancel</button>
           </div>
         </div>
       </Modal>
