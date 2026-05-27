@@ -20,7 +20,7 @@ export interface QuizGenParams {
 }
 
 export async function generateQuiz(params: QuizGenParams): Promise<Question[]> {
-  const model = getClient().getGenerativeModel({ model: 'gemini-1.5-flash' })
+  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
 
   const prompt = `
 You are an expert Indian school teacher creating quiz questions for the "${params.board}" curriculum.
@@ -80,7 +80,7 @@ export interface InsightsData {
 }
 
 export async function generateInsights(data: InsightsData): Promise<string> {
-  const model = getClient().getGenerativeModel({ model: 'gemini-1.5-flash' })
+  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
 
   const prompt = `
 You are an educational analytics assistant for a private tutor in India.
