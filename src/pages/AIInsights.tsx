@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import { format } from 'date-fns'
 import {
   Sparkles, Brain, RefreshCw, Wand2, Plus, Trash2,
   BookOpen, ChevronDown, ChevronUp, Save, Loader2, AlertCircle,
+  FileText, Upload, X, File,
 } from 'lucide-react'
-import { generateQuiz, generateInsights, QuizGenParams } from '../lib/ai'
+import { generateQuiz, generateInsights, generateFromPDFFile, QuizGenParams } from '../lib/ai'
 import { useStudents } from '../hooks/useStudents'
 import { useSessions } from '../hooks/useSessions'
 import { useNotes } from '../hooks/useNotes'
@@ -31,7 +32,7 @@ export default function AIInsights() {
   const { totalEarned, totalPending } = useBilling()
   const { addContent } = useContent()
 
-  const [activeTab, setActiveTab] = useState<'insights' | 'quiz'>('insights')
+  const [activeTab, setActiveTab] = useState<'insights' | 'quiz' | 'pdf'>('insights')
 
   // ── Insights state ──────────────────────────────────────────────
   const [insights, setInsights] = useState<string>('')
@@ -48,6 +49,84 @@ export default function AIInsights() {
   const [quizTitle, setQuizTitle] = useState('')
   const [savingQuiz, setSavingQuiz] = useState(false)
   const [expandedQ, setExpandedQ] = useState<number | null>(null)
+
+  // ── PDF → Content state ─────────────────────────────────────────
+  const pdfFileRef = useRef<HTMLInputElement>(null)
+  const [pdfStudentId, setPdfStudentId]       = useState('')
+  const [pdfSubject, setPdfSubject]           = useState('English')
+  const [pdfContentType, setPdfContentType]   = useState<'worksheet'|'quiz'|'test'>('quiz')
+  const [pdfDifficulty, setPdfDifficulty]     = useState<'easy'|'medium'|'hard'>('medium')
+  const [pdfNumQ, setPdfNumQ]                 = useState(5)
+  const [pdfQTypes, setPdfQTypes]             = useState<('mcq'|'short'|'fill'|'long')[]>(['mcq','short'])
+  const [pdfFile, setPdfFile]                 = useState<File | null>(null)
+  const [pdfLoading, setPdfLoading]           = useState(false)
+  const [pdfQuestions, setPdfQuestions]       = useState<Question[]>([])
+  const [pdfTitle, setPdfTitle]               = useState('')
+  const [savingPdf, setSavingPdf]             = useState(false)
+  const [pdfExpandedQ, setPdfExpandedQ]       = useState<number | null>(null)
+
+  const togglePdfQType = (t: 'mcq'|'short'|'fill'|'long') =>
+    setPdfQTypes(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
+
+  const pdfStudent = students.find(s => s.id === pdfStudentId)
+
+  const handleGenerateFromPDF = async () => {
+    if (!pdfFile) { toast.error('Select a PDF file first'); return }
+    if (pdfQTypes.length === 0) { toast.error('Select at least one question type'); return }
+    if (!import.meta.env.VITE_GEMINI_API_KEY) { toast.error('Add VITE_GEMINI_API_KEY first'); return }
+    setPdfLoading(true)
+    setPdfQuestions([])
+    try {
+      const questions = await generateFromPDFFile(pdfFile, {
+        topic:         pdfFile.name.replace('.pdf',''),
+        subject:       pdfSubject,
+        grade:         pdfStudent?.grade ?? '6',
+        board:         pdfStudent?.board ?? 'CBSE',
+        difficulty:    pdfDifficulty,
+        numQuestions:  pdfNumQ,
+        questionTypes: pdfQTypes,
+      })
+      setPdfQuestions(questions)
+      const label = pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'
+      setPdfTitle(`${pdfFile.name.replace('.pdf','')} — ${label}`)
+      toast.success(`${questions.length} questions generated from PDF! ✅`)
+    } catch (e: any) {
+      toast.error(e?.message ?? 'Generation failed')
+    } finally {
+      setPdfLoading(false)
+    }
+  }
+
+  const handleSavePdfContent = async () => {
+    if (!pdfTitle.trim() || pdfQuestions.length === 0) return
+    setSavingPdf(true)
+    try {
+      const totalMarks = pdfQuestions.reduce((s, q) => s + q.marks, 0)
+      await addContent({
+        title:       pdfTitle,
+        type:        pdfContentType,
+        board:       (pdfStudent?.board ?? 'CBSE') as any,
+        grade:       pdfStudent?.grade ?? 'All',
+        subject:     pdfSubject,
+        description: `AI-generated from PDF: ${pdfFile?.name}`,
+        body: '', questions: pdfQuestions, totalMarks,
+        duration:    pdfContentType === 'test' ? 60 : 30,
+        tags: ['ai-generated', 'from-pdf'], forLD: false,
+        fileUrl: '', fileName: '', fileSize: 0,
+        studentId:   pdfStudentId,
+        studentName: pdfStudent?.name ?? '',
+      })
+      toast.success('Saved to Content Library! 🎉')
+      setPdfQuestions([]); setPdfFile(null); setPdfTitle('')
+    } catch {
+      toast.error('Failed to save')
+    } finally {
+      setSavingPdf(false)
+    }
+  }
+
+  const updatePdfQuestion = (idx: number, data: Partial<Question>) =>
+    setPdfQuestions(qs => qs.map((q, i) => i === idx ? { ...q, ...data } : q))
 
   // ── Build insights data ─────────────────────────────────────────
   const insightsData = useMemo(() => {
@@ -213,12 +292,15 @@ export default function AIInsights() {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-2 mb-6">
+      <div className="flex gap-2 mb-6 flex-wrap">
         <button onClick={() => setActiveTab('insights')} className={`tab-btn flex items-center gap-2 ${activeTab === 'insights' ? 'active' : ''}`}>
           <Brain size={15} /> Student Insights
         </button>
         <button onClick={() => setActiveTab('quiz')} className={`tab-btn flex items-center gap-2 ${activeTab === 'quiz' ? 'active' : ''}`}>
           <Wand2 size={15} /> AI Quiz Generator
+        </button>
+        <button onClick={() => setActiveTab('pdf')} className={`tab-btn flex items-center gap-2 ${activeTab === 'pdf' ? 'active' : ''}`}>
+          <FileText size={15} /> Generate from PDF
         </button>
       </div>
 
@@ -307,6 +389,215 @@ export default function AIInsights() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ── GENERATE FROM PDF TAB ────────────────────────── */}
+      {activeTab === 'pdf' && (
+        <div className="space-y-5">
+          <div className="card p-5">
+            <h3 className="font-semibold text-slate-900 mb-1 flex items-center gap-2">
+              <FileText size={16} className="text-indigo-500" /> Generate from PDF
+            </h3>
+            <p className="text-xs text-slate-400 mb-5">Upload any study material PDF — AI reads it and creates a worksheet, quiz or exam paper instantly.</p>
+
+            <div className="space-y-4">
+              {/* Step 1: Student */}
+              <div>
+                <label className="label">Step 1 — Select Student <span className="text-slate-400 font-normal">(optional)</span></label>
+                <select className="input" value={pdfStudentId} onChange={e => setPdfStudentId(e.target.value)}>
+                  <option value="">General (no specific student)</option>
+                  {students.filter(s => s.active).map(s => (
+                    <option key={s.id} value={s.id}>{s.name} — Grade {s.grade} · {s.board}</option>
+                  ))}
+                </select>
+                {pdfStudent && (
+                  <p className="text-xs text-indigo-600 mt-1">
+                    ✓ Grade {pdfStudent.grade} · {pdfStudent.board} will be used for question context
+                  </p>
+                )}
+              </div>
+
+              {/* Step 2: Subject */}
+              <div>
+                <label className="label">Step 2 — Subject</label>
+                <select className="input" value={pdfSubject} onChange={e => setPdfSubject(e.target.value)}>
+                  {SUBJECTS.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+
+              {/* Step 3: Content Type */}
+              <div>
+                <label className="label">Step 3 — Type of Content to Create</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([['worksheet','📝 Worksheet'],['quiz','🧠 Quiz'],['test','📋 Exam Paper']] as const).map(([val, label]) => (
+                    <button key={val} type="button" onClick={() => setPdfContentType(val)}
+                      className={`py-3 rounded-xl border text-sm font-medium transition-all ${pdfContentType === val ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}`}
+                    >{label}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Step 4: Upload PDF */}
+              <div>
+                <label className="label">Step 4 — Upload PDF</label>
+                <div
+                  onClick={() => pdfFileRef.current?.click()}
+                  className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors ${pdfFile ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}
+                >
+                  {pdfFile ? (
+                    <div className="flex items-center justify-center gap-3">
+                      <File size={22} className="text-indigo-500 flex-shrink-0" />
+                      <div className="text-left">
+                        <div className="text-sm font-medium text-slate-800">{pdfFile.name}</div>
+                        <div className="text-xs text-slate-500">{(pdfFile.size / 1024).toFixed(0)} KB</div>
+                      </div>
+                      <button type="button" onClick={e => { e.stopPropagation(); setPdfFile(null) }}
+                        className="ml-auto p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div>
+                      <Upload size={28} className="text-slate-300 mx-auto mb-2" />
+                      <p className="text-sm text-slate-500 font-medium">Click to select PDF</p>
+                      <p className="text-xs text-slate-400 mt-0.5">AI will read the full content and generate questions</p>
+                    </div>
+                  )}
+                </div>
+                <input ref={pdfFileRef} type="file" accept=".pdf" className="hidden"
+                  onChange={e => setPdfFile(e.target.files?.[0] ?? null)} />
+              </div>
+
+              {/* Step 5: Settings */}
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Difficulty</label>
+                  <div className="flex gap-2">
+                    {(['easy','medium','hard'] as const).map(d => (
+                      <button key={d} type="button" onClick={() => setPdfDifficulty(d)}
+                        className={`flex-1 py-2 text-xs font-semibold rounded-lg border capitalize transition-all ${pdfDifficulty === d
+                          ? d === 'easy' ? 'bg-green-600 border-green-600 text-white'
+                            : d === 'medium' ? 'bg-amber-500 border-amber-500 text-white'
+                            : 'bg-red-600 border-red-600 text-white'
+                          : 'border-slate-200 text-slate-600 hover:border-slate-300'}`}
+                      >{d}</button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="label">Number of Questions</label>
+                  <div className="flex gap-1.5">
+                    {[5, 8, 10, 15].map(n => (
+                      <button key={n} type="button" onClick={() => setPdfNumQ(n)}
+                        className={`flex-1 py-2 text-xs font-semibold rounded-lg border transition-all ${pdfNumQ === n ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-200 text-slate-600 hover:border-indigo-300'}`}
+                      >{n}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="label">Question Types</label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {Q_TYPES.map(({ id, label }) => (
+                    <button key={id} type="button" onClick={() => togglePdfQType(id as any)}
+                      className={`p-2.5 text-xs font-medium rounded-lg border transition-all text-left ${pdfQTypes.includes(id as any) ? 'bg-indigo-50 border-indigo-400 text-indigo-700' : 'border-slate-200 text-slate-600 hover:border-indigo-200'}`}
+                    >
+                      {pdfQTypes.includes(id as any) && '✓ '}{label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Generate button */}
+              <button
+                onClick={handleGenerateFromPDF}
+                disabled={pdfLoading || !pdfFile || !hasGeminiKey || pdfQTypes.length === 0}
+                className="btn-primary w-full justify-center py-3"
+              >
+                {pdfLoading
+                  ? <><Loader2 size={16} className="animate-spin" /> Reading PDF & Generating…</>
+                  : <><Sparkles size={16} /> Generate {pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'} from PDF</>}
+              </button>
+            </div>
+          </div>
+
+          {/* Generated Questions Preview */}
+          {pdfQuestions.length > 0 && (
+            <div className="card p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-slate-900">
+                  Generated Questions ({pdfQuestions.length})
+                  <span className="ml-2 text-xs font-normal text-slate-400">
+                    {pdfQuestions.reduce((s, q) => s + q.marks, 0)} marks total
+                  </span>
+                </h3>
+                <span className="text-xs text-slate-400">Review & edit before saving</span>
+              </div>
+
+              <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+                {pdfQuestions.map((q, i) => (
+                  <div key={i} className="border border-slate-200 rounded-xl overflow-hidden">
+                    <button
+                      className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 text-left"
+                      onClick={() => setPdfExpandedQ(pdfExpandedQ === i ? null : i)}
+                    >
+                      <span className="w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">{i + 1}</span>
+                      <span className="flex-1 text-sm font-medium text-slate-800 truncate">{q.text}</span>
+                      <span className="text-xs text-slate-400 flex-shrink-0">{q.marks}m · {q.type}</span>
+                      {pdfExpandedQ === i ? <ChevronUp size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />}
+                    </button>
+                    {pdfExpandedQ === i && (
+                      <div className="px-4 pb-4 border-t border-slate-100 pt-3 space-y-2">
+                        <textarea className="input resize-none text-sm" rows={2} value={q.text}
+                          onChange={e => updatePdfQuestion(i, { text: e.target.value })} />
+                        {q.type === 'mcq' && (
+                          <div className="grid grid-cols-2 gap-2">
+                            {(q.options ?? []).map((o, oi) => (
+                              <input key={oi} className="input text-xs" value={o}
+                                onChange={e => {
+                                  const opts = [...(q.options ?? [])]
+                                  opts[oi] = e.target.value
+                                  updatePdfQuestion(i, { options: opts })
+                                }}
+                                placeholder={`Option ${String.fromCharCode(65 + oi)}`} />
+                            ))}
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <div className="flex-1">
+                            <label className="text-xs text-slate-400 mb-1 block">Answer / Key</label>
+                            <input className="input text-xs" value={q.answer ?? ''}
+                              onChange={e => updatePdfQuestion(i, { answer: e.target.value })} />
+                          </div>
+                          <div className="w-20">
+                            <label className="text-xs text-slate-400 mb-1 block">Marks</label>
+                            <input type="number" className="input text-xs" min={1} value={q.marks}
+                              onChange={e => updatePdfQuestion(i, { marks: Number(e.target.value) })} />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4 pt-4 border-t border-slate-100 space-y-3">
+                <div>
+                  <label className="label">Title</label>
+                  <input className="input" value={pdfTitle} onChange={e => setPdfTitle(e.target.value)}
+                    placeholder="e.g. Chapter 5 — Photosynthesis Quiz" />
+                </div>
+                <button onClick={handleSavePdfContent} disabled={savingPdf || !pdfTitle.trim()}
+                  className="btn-primary w-full justify-center">
+                  {savingPdf
+                    ? <><Loader2 size={15} className="animate-spin" /> Saving…</>
+                    : <><Save size={15} /> Save to Content Library</>}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

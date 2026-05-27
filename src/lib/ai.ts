@@ -63,6 +63,53 @@ Return ONLY a valid JSON array — no markdown, no explanation, no extra text:
   return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
 }
 
+// ── Generate from a local PDF File (browser FileReader, no upload) ─
+export async function generateFromPDFFile(
+  file: File,
+  params: QuizGenParams,
+): Promise<Question[]> {
+  // Read the file as base64 using the browser FileReader API
+  const base64 = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve((reader.result as string).split(',')[1])
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+
+  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
+
+  const prompt = `
+You are an expert Indian school teacher. Read the attached PDF carefully.
+Create exactly ${params.numQuestions} questions based on the PDF content for:
+- Subject: ${params.subject}
+- Grade/Standard: ${params.grade}
+- Board: ${params.board}
+- Difficulty: ${params.difficulty}
+- Question types: ${params.questionTypes.join(', ')}
+
+Rules:
+- Base ALL questions strictly on the content of the PDF.
+- Distribute questions evenly across the requested types.
+- For "mcq": exactly 4 options; "answer" = full text of correct option.
+- For "short": "answer" = 1–2 sentence expected answer.
+- For "fill": question must contain "_____"; "answer" = missing word/phrase.
+- For "long": "answer" = key points (3–5 bullet points).
+- Marks: mcq=1, short=2, fill=1, long=4
+
+Return ONLY a valid JSON array — no markdown, no explanation:
+[{"id":"1","text":"...","type":"mcq","options":["A","B","C","D"],"answer":"A","marks":1}]
+`.trim()
+
+  const result = await model.generateContent([
+    { inlineData: { mimeType: 'application/pdf', data: base64 } },
+    { text: prompt },
+  ])
+  const raw = result.response.text().trim()
+  const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
+  const parsed: Question[] = JSON.parse(jsonStr)
+  return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
+}
+
 // ── Generate from uploaded PDF ─────────────────────────────────
 export async function generateFromPDF(
   pdfUrl: string,
