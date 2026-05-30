@@ -1,12 +1,12 @@
 import Groq from 'groq-sdk'
 import * as pdfjsLib from 'pdfjs-dist'
+import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { Question } from '../types'
 
 // ── PDF.js worker ───────────────────────────────────────────────
-if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
-}
+// Served from the same origin (Vite bundles it as a static asset).
+// This avoids cross-origin worker restrictions that silently break parsing.
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl
 
 // ── Groq client ─────────────────────────────────────────────────
 // Free tier: 30 RPM · 14 400 RPD · model-dependent TPM
@@ -35,9 +35,11 @@ function textLsKey(url: string): string {
 export async function extractPDFTextFromURL(pdfUrl: string): Promise<string> {
   const now = Date.now()
 
+  // Memory cache
   const m = textMemCache.get(pdfUrl)
   if (m && m.exp > now) return m.text
 
+  // localStorage cache
   const lsKey = textLsKey(pdfUrl)
   try {
     const raw = localStorage.getItem(lsKey)
@@ -48,11 +50,46 @@ export async function extractPDFTextFromURL(pdfUrl: string): Promise<string> {
     }
   } catch { /* ignore */ }
 
+  // Fetch the file
   const res = await fetch(pdfUrl)
-  if (!res.ok) throw new Error('Could not fetch PDF')
+  if (!res.ok) throw new Error(`Could not download PDF (HTTP ${res.status}). Try re-uploading.`)
+
+  // Reject HTML error pages served in place of the file
+  const ct = res.headers.get('content-type') ?? ''
+  if (ct.includes('text/html')) {
+    throw new Error('The PDF URL returned an HTML page instead of a file. Please re-upload the PDF.')
+  }
+
   const arrayBuffer = await res.arrayBuffer()
 
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+  // Validate PDF magic bytes — every valid PDF starts with "%PDF-"
+  const header = String.fromCharCode(...new Uint8Array(arrayBuffer.slice(0, 5)))
+  if (!header.startsWith('%PDF')) {
+    throw new Error(
+      'The file does not appear to be a valid PDF. ' +
+      'Please re-upload the original PDF file.'
+    )
+  }
+
+  // Parse with PDF.js
+  let pdf: pdfjsLib.PDFDocumentProxy
+  try {
+    pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+  } catch (e: any) {
+    const name: string = e?.name ?? ''
+    if (name === 'InvalidPDFException' || name === 'MissingPDFException') {
+      throw new Error(
+        'PDF structure is invalid or the file is corrupted. ' +
+        'Try opening the PDF in Adobe Reader first, then re-upload.'
+      )
+    }
+    if (name === 'PasswordException') {
+      throw new Error('This PDF is password-protected. Remove the password before uploading.')
+    }
+    throw e
+  }
+
+  // Extract text from all pages (cap at 80 pages)
   const pageTexts: string[] = []
   for (let i = 1; i <= Math.min(pdf.numPages, 80); i++) {
     const page = await pdf.getPage(i)
@@ -63,7 +100,17 @@ export async function extractPDFTextFromURL(pdfUrl: string): Promise<string> {
   }
 
   const text = pageTexts.join('\n').trim()
-  const exp  = now + TEXT_TTL
+
+  // Warn about image-only (scanned) PDFs but don't block — AI will generate
+  // generic questions based on the topic name instead.
+  if (!text) {
+    throw new Error(
+      'This PDF has no selectable text — it may be a scanned image. ' +
+      'Use the AI Quiz Generator tab and type the topic manually instead.'
+    )
+  }
+
+  const exp = now + TEXT_TTL
   textMemCache.set(pdfUrl, { text, exp })
   if (text.length < 400_000) {
     try { localStorage.setItem(lsKey, JSON.stringify({ text, exp })) } catch { /* quota */ }
