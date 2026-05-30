@@ -115,7 +115,13 @@ export default function Content() {
       toast.success(`${label} created and saved to Content Library! ✅`)
       setGenSource(null)
     } catch (e: any) {
-      toast.error(e?.message ?? 'Generation failed')
+      const msg: string = e?.message ?? 'Generation failed'
+      const retryMatch = msg.match(/retry in (\d+(\.\d+)?)s/i)
+      const friendly = retryMatch
+        ? `Gemini rate limit — wait ${Math.ceil(parseFloat(retryMatch[1]))}s and try again`
+        : msg.includes('quota') ? 'Gemini quota exceeded. Wait a minute and retry.'
+        : msg
+      toast.error(friendly)
     } finally {
       setIsGenerating(false)
     }

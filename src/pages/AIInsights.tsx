@@ -58,8 +58,10 @@ export default function AIInsights() {
   const [pdfDifficulty, setPdfDifficulty]       = useState<'easy'|'medium'|'hard'>('medium')
   const [pdfNumQ, setPdfNumQ]                   = useState(5)
   const [pdfQTypes, setPdfQTypes]               = useState<('mcq'|'short'|'fill'|'long')[]>(['mcq','short'])
+  const [topicMode, setTopicMode]               = useState<'all'|'single'|'multiple'>('all')
   const [pdfTopics, setPdfTopics]               = useState<string[]>([])
   const [selectedTopics, setSelectedTopics]     = useState<string[]>([])
+  const [singleTopic, setSingleTopic]           = useState('')
   const [extractingTopics, setExtractingTopics] = useState(false)
   const [topicsOpen, setTopicsOpen]             = useState(false)
   const [pdfLoading, setPdfLoading]             = useState(false)
@@ -82,15 +84,9 @@ export default function AIInsights() {
     if (pdfStudent?.subjects?.length) setPdfSubject(pdfStudent.subjects[0])
   }, [pdfStudentId])
 
-  // Extract topics whenever a PDF is selected
+  // Reset topics when PDF changes
   useEffect(() => {
-    if (!pdfContentId || !selectedPDF?.fileUrl) { setPdfTopics([]); setSelectedTopics([]); return }
-    setExtractingTopics(true)
-    setPdfTopics([]); setSelectedTopics([])
-    extractTopicsFromURL(selectedPDF.fileUrl)
-      .then(topics => { setPdfTopics(topics); setSelectedTopics(topics) })
-      .catch(() => toast.error('Could not extract topics — check PDF is publicly accessible'))
-      .finally(() => setExtractingTopics(false))
+    setPdfTopics([]); setSelectedTopics([]); setSingleTopic(''); setTopicMode('all')
   }, [pdfContentId])
 
   // Close topics dropdown on outside click
@@ -108,34 +104,71 @@ export default function AIInsights() {
   const toggleTopic = (t: string) =>
     setSelectedTopics(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
 
+  // Parse Gemini quota retry time from error message
+  const parseRetrySeconds = (msg: string) => {
+    const m = msg.match(/retry in (\d+(\.\d+)?)s/i)
+    return m ? Math.ceil(parseFloat(m[1])) : null
+  }
+
+  const friendlyAIError = (e: any): string => {
+    const msg: string = e?.message ?? String(e)
+    const retry = parseRetrySeconds(msg)
+    if (retry) return `Gemini rate limit hit — please wait ${retry} seconds and try again.`
+    if (msg.includes('quota')) return 'Gemini API quota exceeded. Wait a minute and retry.'
+    if (msg.includes('API_KEY') || msg.includes('api key')) return 'Invalid Gemini API key. Check VITE_GEMINI_API_KEY in Render.'
+    return msg
+  }
+
+  const handleExtractTopics = async () => {
+    if (!selectedPDF?.fileUrl) return
+    setExtractingTopics(true)
+    setPdfTopics([]); setSelectedTopics([]); setSingleTopic('')
+    try {
+      const topics = await extractTopicsFromURL(selectedPDF.fileUrl)
+      setPdfTopics(topics)
+      setSelectedTopics(topics)    // default: all selected
+      setSingleTopic(topics[0] ?? '')
+    } catch (e: any) {
+      toast.error(friendlyAIError(e))
+    } finally {
+      setExtractingTopics(false)
+    }
+  }
+
+  // Compute effective topics for generation
+  const effectiveTopics = topicMode === 'all'
+    ? []   // empty = whole PDF
+    : topicMode === 'single'
+      ? (singleTopic ? [singleTopic] : [])
+      : selectedTopics
+
   const handleGenerateFromPDF = async () => {
     if (!selectedPDF?.fileUrl) { toast.error('Select a PDF from the Content Library first'); return }
     if (pdfQTypes.length === 0) { toast.error('Select at least one question type'); return }
     if (!import.meta.env.VITE_GEMINI_API_KEY) { toast.error('Add VITE_GEMINI_API_KEY first'); return }
+    if (topicMode !== 'all' && effectiveTopics.length === 0) { toast.error('Select at least one chapter/topic'); return }
     setPdfLoading(true); setPdfQuestions([])
     try {
-      const topicContext = selectedTopics.length > 0
-        ? `Focus ONLY on these topics: ${selectedTopics.join(', ')}`
-        : ''
+      const topicStr = effectiveTopics.length > 0 ? effectiveTopics.join(', ') : selectedPDF.title
       const questions = await generateFromPDF(selectedPDF.fileUrl, {
-        topic:         selectedTopics.length > 0 ? selectedTopics.join(', ') : selectedPDF.title,
+        topic:         topicStr,
         subject:       pdfSubject,
-        grade:         pdfStudent?.grade ?? selectedPDF.grade ?? '6',
-        board:         (pdfStudent?.board ?? selectedPDF.board ?? 'CBSE') as string,
+        grade:         pdfStudent?.grade ?? (selectedPDF.grade !== 'All' ? selectedPDF.grade : '6'),
+        board:         (pdfStudent?.board ?? (selectedPDF.board !== 'All' ? selectedPDF.board : 'CBSE')) as string,
         difficulty:    pdfDifficulty,
         numQuestions:  pdfNumQ,
         questionTypes: pdfQTypes,
-        context:       topicContext,
+        context:       effectiveTopics.length > 0 ? `Focus ONLY on these chapters/topics: ${effectiveTopics.join(', ')}` : '',
       })
       setPdfQuestions(questions)
       const label = pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'
-      const topicStr = selectedTopics.length > 0 && selectedTopics.length <= 3
-        ? ` (${selectedTopics.join(', ')})`
-        : ''
-      setPdfTitle(`${selectedPDF.title}${topicStr} — ${label}`)
+      const topicSuffix = effectiveTopics.length > 0 && effectiveTopics.length <= 2
+        ? ` (${effectiveTopics.join(', ')})`
+        : effectiveTopics.length > 2 ? ` (${effectiveTopics.length} topics)` : ''
+      setPdfTitle(`${selectedPDF.title}${topicSuffix} — ${label}`)
       toast.success(`${questions.length} questions generated! ✅`)
     } catch (e: any) {
-      toast.error(e?.message ?? 'Generation failed')
+      toast.error(friendlyAIError(e))
     } finally {
       setPdfLoading(false)
     }
@@ -152,7 +185,7 @@ export default function AIInsights() {
         board:       (pdfStudent?.board ?? selectedPDF?.board ?? 'CBSE') as any,
         grade:       pdfStudent?.grade ?? selectedPDF?.grade ?? 'All',
         subject:     pdfSubject,
-        description: `AI-generated from "${selectedPDF?.title}"${selectedTopics.length ? ` — Topics: ${selectedTopics.join(', ')}` : ''}`,
+        description: `AI-generated from "${selectedPDF?.title}"${effectiveTopics.length ? ` — Topics: ${effectiveTopics.join(', ')}` : ''}`,
         body: '', questions: pdfQuestions, totalMarks,
         duration:    pdfContentType === 'test' ? 60 : 30,
         tags: ['ai-generated', 'from-pdf'], forLD: false,
@@ -161,7 +194,8 @@ export default function AIInsights() {
         studentName: pdfStudent?.name ?? '',
       })
       toast.success('Saved to Content Library! 🎉')
-      setPdfQuestions([]); setPdfTitle(''); setPdfContentId(''); setSelectedTopics([]); setPdfTopics([])
+      setPdfQuestions([]); setPdfTitle(''); setPdfContentId('')
+      setSelectedTopics([]); setPdfTopics([]); setSingleTopic('')
     } catch {
       toast.error('Failed to save')
     } finally {
@@ -504,57 +538,53 @@ export default function AIInsights() {
                 )}
               </div>
 
-              {/* Step 5: Topic selection (auto-extracted from PDF) */}
+              {/* Step 5: Chapter / Topic selection */}
               {pdfContentId && (
-                <div>
-                  <label className="label">
-                    Step 5 — Select Topics
-                    {extractingTopics && <span className="ml-2 text-indigo-500 font-normal text-xs flex items-center gap-1 inline-flex"><Loader2 size={11} className="animate-spin" /> Extracting topics from PDF…</span>}
-                    {!extractingTopics && pdfTopics.length > 0 && (
-                      <span className="ml-2 text-slate-400 font-normal text-xs">({selectedTopics.length}/{pdfTopics.length} selected)</span>
-                    )}
-                  </label>
+                <div className="space-y-3">
+                  <label className="label">Step 5 — Chapter / Topic Selection</label>
 
-                  {!extractingTopics && pdfTopics.length > 0 && (
+                  {/* Mode selector */}
+                  <div className="grid grid-cols-3 gap-2">
+                    {([
+                      ['all',      '📖 All Chapters'],
+                      ['single',   '📄 Single Chapter'],
+                      ['multiple', '☑️ Multiple Chapters'],
+                    ] as const).map(([val, lbl]) => (
+                      <button key={val} type="button"
+                        onClick={() => { setTopicMode(val); if (val !== 'all' && pdfTopics.length === 0) {} }}
+                        className={`py-2 px-2 rounded-xl border text-xs font-medium transition-all ${topicMode === val ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}`}
+                      >{lbl}</button>
+                    ))}
+                  </div>
+
+                  {/* Extract button — only shown when single/multiple mode and no topics yet */}
+                  {topicMode !== 'all' && pdfTopics.length === 0 && (
+                    <button type="button" onClick={handleExtractTopics} disabled={extractingTopics}
+                      className="btn-secondary w-full justify-center">
+                      {extractingTopics
+                        ? <><Loader2 size={14} className="animate-spin" /> Extracting chapters from PDF…</>
+                        : <><Sparkles size={14} /> Extract Chapters / Topics from PDF</>}
+                    </button>
+                  )}
+
+                  {/* SINGLE mode — radio list */}
+                  {topicMode === 'single' && pdfTopics.length > 0 && (
                     <div ref={topicsRef} className="relative">
-                      {/* Dropdown trigger */}
-                      <button
-                        type="button"
-                        onClick={() => setTopicsOpen(o => !o)}
-                        className="input w-full flex items-center justify-between text-left"
-                      >
-                        <span className="truncate text-sm">
-                          {selectedTopics.length === 0
-                            ? 'Select topics…'
-                            : selectedTopics.length === pdfTopics.length
-                              ? 'All topics selected'
-                              : selectedTopics.slice(0,2).join(', ') + (selectedTopics.length > 2 ? ` +${selectedTopics.length - 2} more` : '')}
-                        </span>
+                      <button type="button" onClick={() => setTopicsOpen(o => !o)}
+                        className="input w-full flex items-center justify-between text-left">
+                        <span className="text-sm truncate">{singleTopic || 'Select a chapter…'}</span>
                         <ChevronsUpDown size={14} className="text-slate-400 flex-shrink-0 ml-2" />
                       </button>
-
-                      {/* Dropdown panel */}
                       {topicsOpen && (
-                        <div className="absolute z-30 top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-64 overflow-y-auto">
-                          {/* Select All / Clear */}
-                          <div className="flex gap-2 px-3 py-2 border-b border-slate-100 sticky top-0 bg-white">
-                            <button type="button" onClick={() => setSelectedTopics([...pdfTopics])}
-                              className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Select All</button>
-                            <span className="text-slate-300">|</span>
-                            <button type="button" onClick={() => setSelectedTopics([])}
-                              className="text-xs text-slate-500 hover:text-slate-700">Clear All</button>
-                          </div>
-                          {pdfTopics.map(topic => (
-                            <button
-                              key={topic}
-                              type="button"
-                              onClick={() => toggleTopic(topic)}
-                              className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 text-left transition-colors"
-                            >
-                              <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 transition-colors ${selectedTopics.includes(topic) ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300'}`}>
-                                {selectedTopics.includes(topic) && <Check size={10} className="text-white" />}
+                        <div className="absolute z-30 top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-60 overflow-y-auto">
+                          {pdfTopics.map(t => (
+                            <button key={t} type="button"
+                              onClick={() => { setSingleTopic(t); setTopicsOpen(false) }}
+                              className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-indigo-50 text-left">
+                              <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${singleTopic === t ? 'border-indigo-600' : 'border-slate-300'}`}>
+                                {singleTopic === t && <div className="w-2 h-2 rounded-full bg-indigo-600" />}
                               </div>
-                              <span className="text-sm text-slate-700">{topic}</span>
+                              <span className="text-sm text-slate-700">{t}</span>
                             </button>
                           ))}
                         </div>
@@ -562,15 +592,47 @@ export default function AIInsights() {
                     </div>
                   )}
 
-                  {/* Selected topics as chips */}
-                  {selectedTopics.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mt-2">
-                      {selectedTopics.map(t => (
-                        <span key={t} className="inline-flex items-center gap-1 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full">
-                          {t}
-                          <button type="button" onClick={() => toggleTopic(t)} className="hover:text-red-500 ml-0.5">×</button>
+                  {/* MULTIPLE mode — checkbox dropdown */}
+                  {topicMode === 'multiple' && pdfTopics.length > 0 && (
+                    <div ref={topicsRef} className="relative">
+                      <button type="button" onClick={() => setTopicsOpen(o => !o)}
+                        className="input w-full flex items-center justify-between text-left">
+                        <span className="text-sm truncate">
+                          {selectedTopics.length === 0 ? 'Select chapters…'
+                            : selectedTopics.length === pdfTopics.length ? 'All chapters selected'
+                            : selectedTopics.slice(0,2).join(', ') + (selectedTopics.length > 2 ? ` +${selectedTopics.length - 2} more` : '')}
                         </span>
-                      ))}
+                        <ChevronsUpDown size={14} className="text-slate-400 flex-shrink-0 ml-2" />
+                      </button>
+                      {topicsOpen && (
+                        <div className="absolute z-30 top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-64 overflow-y-auto">
+                          <div className="flex gap-3 px-3 py-2 border-b border-slate-100 sticky top-0 bg-white">
+                            <button type="button" onClick={() => setSelectedTopics([...pdfTopics])} className="text-xs text-indigo-600 font-medium">Select All</button>
+                            <span className="text-slate-300">|</span>
+                            <button type="button" onClick={() => setSelectedTopics([])} className="text-xs text-slate-500">Clear All</button>
+                            <span className="ml-auto text-xs text-slate-400">{selectedTopics.length}/{pdfTopics.length}</span>
+                          </div>
+                          {pdfTopics.map(t => (
+                            <button key={t} type="button" onClick={() => toggleTopic(t)}
+                              className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 text-left">
+                              <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${selectedTopics.includes(t) ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300'}`}>
+                                {selectedTopics.includes(t) && <Check size={10} className="text-white" />}
+                              </div>
+                              <span className="text-sm text-slate-700">{t}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {/* chips */}
+                      {selectedTopics.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {selectedTopics.map(t => (
+                            <span key={t} className="inline-flex items-center gap-1 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full">
+                              {t}<button type="button" onClick={() => toggleTopic(t)} className="hover:text-red-500">×</button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -625,7 +687,10 @@ export default function AIInsights() {
               >
                 {pdfLoading
                   ? <><Loader2 size={16} className="animate-spin" /> Reading PDF & Generating…</>
-                  : <><Sparkles size={16} /> Generate {pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'}{selectedTopics.length > 0 ? ` (${selectedTopics.length} topic${selectedTopics.length > 1 ? 's' : ''})` : ''}</>}
+                  : <><Sparkles size={16} /> Generate {pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'}
+                      {topicMode === 'single' && singleTopic ? ` — ${singleTopic}` : ''}
+                      {topicMode === 'multiple' && selectedTopics.length > 0 ? ` (${selectedTopics.length} chapters)` : ''}
+                    </>}
               </button>
             </div>
           </div>
