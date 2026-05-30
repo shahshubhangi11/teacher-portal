@@ -1,116 +1,83 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
+import * as pdfjsLib from 'pdfjs-dist'
 import { Question } from '../types'
 
+// ── PDF.js worker ───────────────────────────────────────────────
+// Load from unpkg CDN — exact version match, no bundling needed.
+if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+}
+
+// ── Gemini client ───────────────────────────────────────────────
 function getClient() {
   const key = import.meta.env.VITE_GEMINI_API_KEY
   if (!key) throw new Error('VITE_GEMINI_API_KEY is not set in .env')
   return new GoogleGenerativeAI(key)
 }
 
-// ── Gemini Files API — upload once, reuse for 47 h ─────────────
-// Sending a PDF as base64 inline data on every request burns tokens fast.
-// Instead we upload to the Files API once and reference it by URI.
-// Google caches files for 48 h; we cache the URI for 47 h.
+// ── PDF text extraction with dual caching ──────────────────────
+// Instead of sending the raw PDF binary (millions of tokens),
+// we extract plain text (~30K tokens for a 100-page book).
+// The extracted text is cached in memory + localStorage for 24 h.
 
-const FILE_TTL_MS = 47 * 60 * 60 * 1_000
-const memFileCache = new Map<string, { uri: string; exp: number }>()
+const TEXT_TTL = 24 * 60 * 60 * 1_000   // 24 hours
+const textMemCache = new Map<string, { text: string; exp: number }>()
 
-function filesCacheKey(url: string): string {
-  // Short, stable localStorage key derived from the URL
+function textLsKey(url: string): string {
   let h = 0
   for (let i = 0; i < url.length; i++) h = (Math.imul(31, h) + url.charCodeAt(i)) | 0
-  return `gf_${Math.abs(h).toString(36)}`
+  return `pxt_${Math.abs(h).toString(36)}`
 }
 
-/**
- * Returns a Gemini Files API URI for the given PDF URL.
- * On the first call it uploads the file; subsequent calls return the cached URI.
- * Returns null on any error so callers can fall back to inline base64.
- */
-async function getOrUploadGeminiFile(pdfUrl: string, apiKey: string): Promise<string | null> {
+export async function extractPDFTextFromURL(pdfUrl: string): Promise<string> {
   const now = Date.now()
 
-  // 1 — in-memory cache (same page session)
-  const m = memFileCache.get(pdfUrl)
-  if (m && m.exp > now) return m.uri
+  // 1 — memory cache (same session)
+  const m = textMemCache.get(pdfUrl)
+  if (m && m.exp > now) return m.text
 
-  // 2 — localStorage cache (survives refresh, valid across sessions within 47 h)
-  const lsKey = filesCacheKey(pdfUrl)
+  // 2 — localStorage cache (survives page refresh, valid 24 h)
+  const lsKey = textLsKey(pdfUrl)
   try {
     const raw = localStorage.getItem(lsKey)
     if (raw) {
-      const { uri, exp } = JSON.parse(raw) as { uri: string; exp: number }
+      const { text, exp } = JSON.parse(raw) as { text: string; exp: number }
       if (exp > now) {
-        memFileCache.set(pdfUrl, { uri, exp })
-        return uri
+        textMemCache.set(pdfUrl, { text, exp })
+        return text
       }
       localStorage.removeItem(lsKey)
     }
-  } catch { /* storage unavailable — continue */ }
+  } catch { /* storage unavailable */ }
 
-  // 3 — fetch PDF and upload to the Gemini Files API (multipart)
-  try {
-    const fetchRes = await fetch(pdfUrl)
-    if (!fetchRes.ok) return null
-    const pdfBytes = new Uint8Array(await fetchRes.arrayBuffer())
-
-    const boundary = 'b' + Math.random().toString(36).slice(2)
-    const metaJson = JSON.stringify({ file: { displayName: 'document.pdf' } })
-    const enc = new TextEncoder()
-    const head = enc.encode(
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metaJson}\r\n` +
-      `--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`
-    )
-    const tail = enc.encode(`\r\n--${boundary}--`)
-
-    const body = new Uint8Array(head.length + pdfBytes.length + tail.length)
-    body.set(head, 0)
-    body.set(pdfBytes, head.length)
-    body.set(tail, head.length + pdfBytes.length)
-
-    const upRes = await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=multipart&key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
-        body: body.buffer,
-      }
-    )
-    if (!upRes.ok) return null   // fall back to inline base64
-
-    const { file } = await upRes.json() as { file: { uri: string } }
-    const uri = file.uri
-    const exp = now + FILE_TTL_MS
-
-    memFileCache.set(pdfUrl, { uri, exp })
-    try { localStorage.setItem(lsKey, JSON.stringify({ uri, exp })) } catch { /* ignore */ }
-
-    return uri
-  } catch {
-    return null  // network or CORS error — caller will use base64 fallback
-  }
-}
-
-/**
- * Builds the PDF content part to pass to model.generateContent().
- * Prefers Files API URI; falls back to base64 inline data.
- */
-async function buildPdfPart(pdfUrl: string, apiKey: string) {
-  const fileUri = await getOrUploadGeminiFile(pdfUrl, apiKey)
-  if (fileUri) {
-    return { fileData: { mimeType: 'application/pdf', fileUri } } as const
-  }
-
-  // Fallback: fetch + base64 encode
+  // 3 — fetch PDF and extract text with PDF.js
   const res = await fetch(pdfUrl)
-  if (!res.ok) throw new Error('Could not fetch PDF. Make sure it is publicly accessible.')
-  const bytes = new Uint8Array(await res.arrayBuffer())
-  let binary = ''
-  const chunk = 8192
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...Array.from(bytes.subarray(i, i + chunk)))
+  if (!res.ok) throw new Error('Could not fetch PDF')
+  const arrayBuffer = await res.arrayBuffer()
+
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+  const pageTexts: string[] = []
+
+  for (let i = 1; i <= Math.min(pdf.numPages, 80); i++) {
+    const page = await pdf.getPage(i)
+    const content = await page.getTextContent()
+    const pageText = (content.items as Array<{ str?: string }>)
+      .map(item => item.str ?? '')
+      .join(' ')
+    pageTexts.push(pageText)
   }
-  return { inlineData: { mimeType: 'application/pdf', data: btoa(binary) } } as const
+
+  const text = pageTexts.join('\n').trim()
+  const exp = now + TEXT_TTL
+
+  textMemCache.set(pdfUrl, { text, exp })
+  // Only persist to localStorage if size is manageable
+  if (text.length < 400_000) {
+    try { localStorage.setItem(lsKey, JSON.stringify({ text, exp })) } catch { /* quota full */ }
+  }
+
+  return text
 }
 
 // ── Quiz Generator ──────────────────────────────────────────────
@@ -122,11 +89,15 @@ export interface QuizGenParams {
   difficulty: 'easy' | 'medium' | 'hard'
   numQuestions: number
   questionTypes: ('mcq' | 'short' | 'fill' | 'long')[]
-  context?: string // optional extra instructions / chapter text
+  context?: string // chapter notes OR extracted PDF text (up to 80 K chars)
 }
 
 export async function generateQuiz(params: QuizGenParams): Promise<Question[]> {
   const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
+
+  const contextSection = params.context
+    ? `\n\nSTUDY MATERIAL — base ALL questions strictly on the following content:\n${params.context.slice(0, 80_000)}`
+    : ''
 
   const prompt = `
 You are an expert Indian school teacher creating quiz questions for the "${params.board}" curriculum.
@@ -137,7 +108,7 @@ Create exactly ${params.numQuestions} quiz questions for:
 - Grade/Standard: ${params.grade}
 - Difficulty: ${params.difficulty}
 - Question types to include: ${params.questionTypes.join(', ')}
-${params.context ? `- Extra context / chapter notes:\n${params.context.slice(0, 2000)}` : ''}
+${contextSection}
 
 Rules:
 - Distribute the ${params.numQuestions} questions evenly across the requested types.
@@ -162,36 +133,35 @@ Return ONLY a valid JSON array — no markdown, no explanation, no extra text:
 
   const result = await model.generateContent(prompt)
   const raw = result.response.text().trim()
-
-  // Strip markdown fences if present
   const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
   const parsed: Question[] = JSON.parse(jsonStr)
   return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
 }
 
 // ── Extract topics / chapters from a PDF URL ───────────────────
+// Extracts text with PDF.js first, then asks Gemini for the topic list.
+// Much lighter than sending the raw PDF binary inline.
 export async function extractTopicsFromURL(pdfUrl: string): Promise<string[]> {
-  const key = import.meta.env.VITE_GEMINI_API_KEY
-  if (!key) throw new Error('VITE_GEMINI_API_KEY is not set in .env')
+  const text = await extractPDFTextFromURL(pdfUrl)
   const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
 
-  const pdfPart = await buildPdfPart(pdfUrl, key)
-
-  const result = await model.generateContent([
-    pdfPart,
-    { text: 'List every distinct chapter, section, topic and sub-topic found in this PDF. Return ONLY a valid JSON array of concise topic names (max 25 items), no markdown, no explanation:\n["Topic 1","Topic 2",...]' },
-  ])
+  const result = await model.generateContent(
+    `Based on the following study material text, list every distinct chapter, section, topic ` +
+    `and sub-topic. Return ONLY a valid JSON array of concise topic names (max 25 items), ` +
+    `no markdown, no explanation:\n["Topic 1","Topic 2",...]\n\n` +
+    `STUDY MATERIAL:\n${text.slice(0, 80_000)}`
+  )
   const raw = result.response.text().trim()
   const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
   return JSON.parse(jsonStr) as string[]
 }
 
-// ── Generate from a local PDF File (browser FileReader, no upload) ─
+// ── Generate from a local PDF File (browser File object) ───────
+// Uses inline base64 since there is no cached URL to key off of.
 export async function generateFromPDFFile(
   file: File,
   params: QuizGenParams,
 ): Promise<Question[]> {
-  // Read the file as base64 using the browser FileReader API
   const base64 = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve((reader.result as string).split(',')[1])
@@ -234,45 +204,20 @@ Return ONLY a valid JSON array — no markdown, no explanation:
 }
 
 // ── Generate from uploaded PDF URL ────────────────────────────
+// Extracts text with PDF.js (cached) then calls generateQuiz.
+// Token cost: ~30 K instead of millions. No rate-limit pressure.
 export async function generateFromPDF(
   pdfUrl: string,
   params: QuizGenParams,
 ): Promise<Question[]> {
-  const key = import.meta.env.VITE_GEMINI_API_KEY
-  if (!key) throw new Error('VITE_GEMINI_API_KEY is not set in .env')
-  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
-
-  // Use Files API URI (cached) or fall back to inline base64
-  const pdfPart = await buildPdfPart(pdfUrl, key)
-
-  const prompt = `
-You are an expert Indian school teacher. Read the attached PDF study material carefully.
-Create exactly ${params.numQuestions} questions based on the content of this PDF for:
-- Subject: ${params.subject}
-- Grade/Standard: ${params.grade}
-- Board: ${params.board}
-- Difficulty: ${params.difficulty}
-- Question types: ${params.questionTypes.join(', ')}
-${params.context ? `- Focus: ${params.context}` : ''}
-
-Rules:
-- Base ALL questions strictly on the content of the PDF — no outside knowledge.
-- Distribute questions evenly across the requested types.
-- For "mcq": exactly 4 options; "answer" = full text of correct option.
-- For "short": "answer" = 1–2 sentence expected answer.
-- For "fill": question must contain "_____"; "answer" = missing word/phrase.
-- For "long": "answer" = key points (3–5 bullet points).
-- Marks: mcq=1, short=2, fill=1, long=4
-
-Return ONLY a valid JSON array — no markdown, no explanation:
-[{"id":"1","text":"...","type":"mcq","options":["A","B","C","D"],"answer":"A","marks":1}]
-`.trim()
-
-  const result = await model.generateContent([pdfPart, { text: prompt }])
-  const raw = result.response.text().trim()
-  const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
-  const parsed: Question[] = JSON.parse(jsonStr)
-  return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
+  const text = await extractPDFTextFromURL(pdfUrl)
+  return generateQuiz({
+    ...params,
+    // Merge with any explicit context already in params (e.g. chapter focus)
+    context: params.context
+      ? `${params.context}\n\nFULL STUDY MATERIAL:\n${text}`
+      : text,
+  })
 }
 
 // ── Student Insights ────────────────────────────────────────────
@@ -287,8 +232,8 @@ export interface InsightsData {
   paidAmount: number
   studentsWithLD: number
   recentNoteTopics: string[]
-  lowAttendanceStudents: string[]   // names
-  topStudents: string[]             // names (most sessions)
+  lowAttendanceStudents: string[]
+  topStudents: string[]
 }
 
 export async function generateInsights(data: InsightsData): Promise<string> {
