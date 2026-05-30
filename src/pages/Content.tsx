@@ -122,8 +122,8 @@ export default function Content() {
       const msg: string = e?.message ?? 'Failed to extract topics'
       const retryMatch = msg.match(/retry in (\d+(\.\d+)?)s/i)
       const friendly = retryMatch
-        ? `Gemini quota hit — waited but still limited. Try again in a minute.`
-        : msg.includes('quota') ? 'Gemini quota exceeded. Wait a minute and retry.'
+        ? `AI quota hit — waited but still limited. Try again in a minute.`
+        : msg.includes('quota') ? 'AI quota exceeded. Wait a minute and retry.'
         : msg
       toast.error(friendly)
     } finally {
@@ -191,8 +191,8 @@ export default function Content() {
       const msg: string = e?.message ?? 'Generation failed'
       const retryMatch = msg.match(/retry in (\d+(\.\d+)?)s/i)
       const friendly = retryMatch
-        ? `Gemini quota hit — waited but still limited. Try again in a minute.`
-        : msg.includes('quota') ? 'Gemini quota exceeded. Wait a minute and retry.'
+        ? `AI quota hit — waited but still limited. Try again in a minute.`
+        : msg.includes('quota') ? 'AI quota exceeded. Wait a minute and retry.'
         : msg
       toast.error(friendly)
     } finally {

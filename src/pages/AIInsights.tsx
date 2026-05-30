@@ -107,7 +107,7 @@ export default function AIInsights() {
   const toggleTopic = (t: string) =>
     setSelectedTopics(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
 
-  // Parse Gemini quota retry time from error message
+  // Parse rate-limit retry time from error message
   const parseRetrySeconds = (msg: string) => {
     const m = msg.match(/retry in (\d+(\.\d+)?)s/i)
     return m ? Math.ceil(parseFloat(m[1])) : null
@@ -116,9 +116,9 @@ export default function AIInsights() {
   const friendlyAIError = (e: any): string => {
     const msg: string = e?.message ?? String(e)
     const retry = parseRetrySeconds(msg)
-    if (retry) return `Gemini rate limit hit — please wait ${retry} seconds and try again.`
-    if (msg.includes('quota')) return 'Gemini API quota exceeded. Wait a minute and retry.'
-    if (msg.includes('API_KEY') || msg.includes('api key')) return 'Invalid Gemini API key. Check VITE_GEMINI_API_KEY in Render.'
+    if (retry) return `AI rate limit — please wait ${retry} seconds and try again.`
+    if (msg.includes('quota')) return 'AI quota exceeded. Wait a moment and retry.'
+    if (msg.includes('API_KEY') || msg.includes('api key') || msg.includes('api_key')) return 'Invalid Groq API key — check VITE_GROQ_API_KEY in Render.'
     return msg
   }
 
@@ -162,7 +162,7 @@ export default function AIInsights() {
   const handleGenerateFromPDF = async () => {
     if (!selectedPDF?.fileUrl) { toast.error('Select a PDF from the Content Library first'); return }
     if (pdfQTypes.length === 0) { toast.error('Select at least one question type'); return }
-    if (!import.meta.env.VITE_GEMINI_API_KEY) { toast.error('Add VITE_GEMINI_API_KEY first'); return }
+    if (!import.meta.env.VITE_GROQ_API_KEY) { toast.error('Add VITE_GROQ_API_KEY first'); return }
     if (topicMode !== 'all' && effectiveTopics.length === 0) { toast.error('Select at least one chapter/topic'); return }
     setPdfLoading(true); setPdfQuestions([])
     try {
@@ -279,8 +279,8 @@ export default function AIInsights() {
   }, [students, sessions, notes, totalEarned, totalPending])
 
   const handleGenerateInsights = async () => {
-    if (!import.meta.env.VITE_GEMINI_API_KEY) {
-      toast.error('Add VITE_GEMINI_API_KEY to your .env file first')
+    if (!import.meta.env.VITE_GROQ_API_KEY) {
+      toast.error('Add VITE_GROQ_API_KEY to your .env file first')
       return
     }
     setInsightsLoading(true)
@@ -311,8 +311,8 @@ export default function AIInsights() {
   const handleGenerateQuiz = async () => {
     if (!quizForm.topic.trim()) { toast.error('Enter a topic first'); return }
     if (quizForm.questionTypes.length === 0) { toast.error('Select at least one question type'); return }
-    if (!import.meta.env.VITE_GEMINI_API_KEY) {
-      toast.error('Add VITE_GEMINI_API_KEY to your .env file first')
+    if (!import.meta.env.VITE_GROQ_API_KEY) {
+      toast.error('Add VITE_GROQ_API_KEY to your .env file first')
       return
     }
     setQuizLoading(true)
@@ -374,7 +374,7 @@ export default function AIInsights() {
     }
   }
 
-  const hasGeminiKey = !!import.meta.env.VITE_GEMINI_API_KEY
+  const hasAIKey = !!import.meta.env.VITE_GROQ_API_KEY
 
   return (
     <div className="p-4 sm:p-6 max-w-5xl mx-auto">
@@ -384,20 +384,19 @@ export default function AIInsights() {
         </div>
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900">AI Tools</h1>
-          <p className="text-slate-500 text-sm">Powered by Google Gemini</p>
+          <p className="text-slate-500 text-sm">Powered by Groq · Llama 3.3 70B</p>
         </div>
       </div>
 
-      {!hasGeminiKey && (
+      {!hasAIKey && (
         <div className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl mb-6">
           <AlertCircle size={18} className="text-amber-600 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-amber-800">
-            <span className="font-semibold">Gemini API key not found.</span> Add{' '}
-            <code className="bg-amber-100 px-1 rounded">VITE_GEMINI_API_KEY=your_key</code> to your{' '}
-            <code className="bg-amber-100 px-1 rounded">.env</code> file.{' '}
+            <span className="font-semibold">Groq API key not found.</span> Add{' '}
+            <code className="bg-amber-100 px-1 rounded">VITE_GROQ_API_KEY=your_key</code> to Render Environment Variables.{' '}
             Get a free key at{' '}
-            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer"
-              className="underline font-medium">aistudio.google.com</a>
+            <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer"
+              className="underline font-medium">console.groq.com</a>
           </div>
         </div>
       )}
@@ -465,7 +464,7 @@ export default function AIInsights() {
               </h3>
               <button
                 onClick={handleGenerateInsights}
-                disabled={insightsLoading || !hasGeminiKey}
+                disabled={insightsLoading || !hasAIKey}
                 className="btn-primary btn-sm"
               >
                 {insightsLoading
@@ -715,7 +714,7 @@ export default function AIInsights() {
               {/* Generate button */}
               <button
                 onClick={handleGenerateFromPDF}
-                disabled={pdfLoading || !pdfContentId || !hasGeminiKey || pdfQTypes.length === 0 || extractingTopics}
+                disabled={pdfLoading || !pdfContentId || !hasAIKey || pdfQTypes.length === 0 || extractingTopics}
                 className="btn-primary w-full justify-center py-3"
               >
                 {pdfLoading
@@ -917,7 +916,7 @@ export default function AIInsights() {
 
               <button
                 onClick={handleGenerateQuiz}
-                disabled={quizLoading || !quizForm.topic.trim() || !hasGeminiKey || quizForm.questionTypes.length === 0}
+                disabled={quizLoading || !quizForm.topic.trim() || !hasAIKey || quizForm.questionTypes.length === 0}
                 className="btn-primary w-full justify-center py-3"
               >
                 {quizLoading

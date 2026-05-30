@@ -1,27 +1,29 @@
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import Groq from 'groq-sdk'
 import * as pdfjsLib from 'pdfjs-dist'
 import { Question } from '../types'
 
 // ── PDF.js worker ───────────────────────────────────────────────
-// Load from unpkg CDN — exact version match, no bundling needed.
 if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
 }
 
-// ── Gemini client ───────────────────────────────────────────────
+// ── Groq client ─────────────────────────────────────────────────
+// Free tier: 30 RPM · 14 400 RPD · model-dependent TPM
+// Sign up at https://console.groq.com → API Keys
+const MODEL = 'llama-3.3-70b-versatile'
+
 function getClient() {
-  const key = import.meta.env.VITE_GEMINI_API_KEY
-  if (!key) throw new Error('VITE_GEMINI_API_KEY is not set in .env')
-  return new GoogleGenerativeAI(key)
+  const key = import.meta.env.VITE_GROQ_API_KEY
+  if (!key) throw new Error('VITE_GROQ_API_KEY is not set — add it in Render Environment Variables')
+  return new Groq({ apiKey: key, dangerouslyAllowBrowser: true })
 }
 
 // ── PDF text extraction with dual caching ──────────────────────
-// Instead of sending the raw PDF binary (millions of tokens),
-// we extract plain text (~30K tokens for a 100-page book).
-// The extracted text is cached in memory + localStorage for 24 h.
+// Extract plain text once; cache in memory + localStorage for 24 h.
+// ~5 K tokens for a typical chapter — well within free-tier limits.
 
-const TEXT_TTL = 24 * 60 * 60 * 1_000   // 24 hours
+const TEXT_TTL = 24 * 60 * 60 * 1_000
 const textMemCache = new Map<string, { text: string; exp: number }>()
 
 function textLsKey(url: string): string {
@@ -33,51 +35,51 @@ function textLsKey(url: string): string {
 export async function extractPDFTextFromURL(pdfUrl: string): Promise<string> {
   const now = Date.now()
 
-  // 1 — memory cache (same session)
   const m = textMemCache.get(pdfUrl)
   if (m && m.exp > now) return m.text
 
-  // 2 — localStorage cache (survives page refresh, valid 24 h)
   const lsKey = textLsKey(pdfUrl)
   try {
     const raw = localStorage.getItem(lsKey)
     if (raw) {
       const { text, exp } = JSON.parse(raw) as { text: string; exp: number }
-      if (exp > now) {
-        textMemCache.set(pdfUrl, { text, exp })
-        return text
-      }
+      if (exp > now) { textMemCache.set(pdfUrl, { text, exp }); return text }
       localStorage.removeItem(lsKey)
     }
-  } catch { /* storage unavailable */ }
+  } catch { /* ignore */ }
 
-  // 3 — fetch PDF and extract text with PDF.js
   const res = await fetch(pdfUrl)
   if (!res.ok) throw new Error('Could not fetch PDF')
   const arrayBuffer = await res.arrayBuffer()
 
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
   const pageTexts: string[] = []
-
   for (let i = 1; i <= Math.min(pdf.numPages, 80); i++) {
     const page = await pdf.getPage(i)
     const content = await page.getTextContent()
-    const pageText = (content.items as Array<{ str?: string }>)
-      .map(item => item.str ?? '')
-      .join(' ')
-    pageTexts.push(pageText)
+    pageTexts.push(
+      (content.items as Array<{ str?: string }>).map(it => it.str ?? '').join(' ')
+    )
   }
 
   const text = pageTexts.join('\n').trim()
-  const exp = now + TEXT_TTL
-
+  const exp  = now + TEXT_TTL
   textMemCache.set(pdfUrl, { text, exp })
-  // Only persist to localStorage if size is manageable
   if (text.length < 400_000) {
-    try { localStorage.setItem(lsKey, JSON.stringify({ text, exp })) } catch { /* quota full */ }
+    try { localStorage.setItem(lsKey, JSON.stringify({ text, exp })) } catch { /* quota */ }
   }
-
   return text
+}
+
+// ── Helper: call Groq chat completions ─────────────────────────
+async function chat(prompt: string): Promise<string> {
+  const completion = await getClient().chat.completions.create({
+    model: MODEL,
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.7,
+    max_tokens: 4096,
+  })
+  return completion.choices[0]?.message?.content ?? ''
 }
 
 // ── Quiz Generator ──────────────────────────────────────────────
@@ -89,18 +91,15 @@ export interface QuizGenParams {
   difficulty: 'easy' | 'medium' | 'hard'
   numQuestions: number
   questionTypes: ('mcq' | 'short' | 'fill' | 'long')[]
-  context?: string // chapter notes OR extracted PDF text (up to 80 K chars)
+  context?: string
 }
 
 export async function generateQuiz(params: QuizGenParams): Promise<Question[]> {
-  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
-
   const contextSection = params.context
-    ? `\n\nSTUDY MATERIAL — base ALL questions strictly on the following content:\n${params.context.slice(0, 80_000)}`
+    ? `\n\nSTUDY MATERIAL — base ALL questions strictly on the following:\n${params.context.slice(0, 20_000)}`
     : ''
 
-  const prompt = `
-You are an expert Indian school teacher creating quiz questions for the "${params.board}" curriculum.
+  const prompt = `You are an expert Indian school teacher creating quiz questions for the "${params.board}" curriculum.
 
 Create exactly ${params.numQuestions} quiz questions for:
 - Topic: "${params.topic}"
@@ -111,101 +110,54 @@ Create exactly ${params.numQuestions} quiz questions for:
 ${contextSection}
 
 Rules:
-- Distribute the ${params.numQuestions} questions evenly across the requested types.
-- For "mcq": provide exactly 4 options; "answer" = the full text of the correct option.
-- For "short": "answer" = a concise expected answer (1–2 sentences).
-- For "fill": question text must contain "_____"; "answer" = the missing word/phrase.
-- For "long": "answer" = key points (bullet list, 3–5 points).
+- Distribute questions evenly across the requested types.
+- For "mcq": exactly 4 options; "answer" = full text of the correct option.
+- For "short": "answer" = 1–2 sentence expected answer.
+- For "fill": question must contain "_____"; "answer" = the missing word/phrase.
+- For "long": "answer" = key points (3–5 bullet points).
 - Marks: mcq=1, short=2, fill=1, long=4
 
-Return ONLY a valid JSON array — no markdown, no explanation, no extra text:
-[
-  {
-    "id": "1",
-    "text": "Question here",
-    "type": "mcq",
-    "options": ["Option A", "Option B", "Option C", "Option D"],
-    "answer": "Option A",
-    "marks": 1
-  }
-]
-`.trim()
+Return ONLY a valid JSON array, no markdown, no explanation:
+[{"id":"1","text":"...","type":"mcq","options":["A","B","C","D"],"answer":"A","marks":1}]`
 
-  const result = await model.generateContent(prompt)
-  const raw = result.response.text().trim()
+  const raw = await chat(prompt)
   const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
   const parsed: Question[] = JSON.parse(jsonStr)
   return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
 }
 
 // ── Extract topics / chapters from a PDF URL ───────────────────
-// Extracts text with PDF.js first, then asks Gemini for the topic list.
-// Much lighter than sending the raw PDF binary inline.
 export async function extractTopicsFromURL(pdfUrl: string): Promise<string[]> {
   const text = await extractPDFTextFromURL(pdfUrl)
-  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
 
-  const result = await model.generateContent(
-    `Based on the following study material text, list every distinct chapter, section, topic ` +
-    `and sub-topic. Return ONLY a valid JSON array of concise topic names (max 25 items), ` +
-    `no markdown, no explanation:\n["Topic 1","Topic 2",...]\n\n` +
-    `STUDY MATERIAL:\n${text.slice(0, 80_000)}`
+  const raw = await chat(
+    `Based on the following study material, list every distinct chapter, section, topic and sub-topic.\n` +
+    `Return ONLY a valid JSON array of concise topic names (max 25 items), no markdown:\n` +
+    `["Topic 1","Topic 2",...]\n\nSTUDY MATERIAL:\n${text.slice(0, 20_000)}`
   )
-  const raw = result.response.text().trim()
   const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
   return JSON.parse(jsonStr) as string[]
 }
 
-// ── Generate from a local PDF File (browser File object) ───────
-// Uses inline base64 since there is no cached URL to key off of.
+// ── Generate from a local PDF File (File object) ───────────────
+// Falls back to text extraction via pdfjs for local files too.
 export async function generateFromPDFFile(
   file: File,
   params: QuizGenParams,
 ): Promise<Question[]> {
-  const base64 = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve((reader.result as string).split(',')[1])
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-
-  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
-
-  const prompt = `
-You are an expert Indian school teacher. Read the attached PDF carefully.
-Create exactly ${params.numQuestions} questions based on the PDF content for:
-- Subject: ${params.subject}
-- Grade/Standard: ${params.grade}
-- Board: ${params.board}
-- Difficulty: ${params.difficulty}
-- Question types: ${params.questionTypes.join(', ')}
-
-Rules:
-- Base ALL questions strictly on the content of the PDF.
-- Distribute questions evenly across the requested types.
-- For "mcq": exactly 4 options; "answer" = full text of correct option.
-- For "short": "answer" = 1–2 sentence expected answer.
-- For "fill": question must contain "_____"; "answer" = missing word/phrase.
-- For "long": "answer" = key points (3–5 bullet points).
-- Marks: mcq=1, short=2, fill=1, long=4
-
-Return ONLY a valid JSON array — no markdown, no explanation:
-[{"id":"1","text":"...","type":"mcq","options":["A","B","C","D"],"answer":"A","marks":1}]
-`.trim()
-
-  const result = await model.generateContent([
-    { inlineData: { mimeType: 'application/pdf', data: base64 } },
-    { text: prompt },
-  ])
-  const raw = result.response.text().trim()
-  const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
-  const parsed: Question[] = JSON.parse(jsonStr)
-  return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
+  const arrayBuffer = await file.arrayBuffer()
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+  const pages: string[] = []
+  for (let i = 1; i <= Math.min(pdf.numPages, 80); i++) {
+    const page = await pdf.getPage(i)
+    const content = await page.getTextContent()
+    pages.push((content.items as Array<{ str?: string }>).map(it => it.str ?? '').join(' '))
+  }
+  const text = pages.join('\n').trim()
+  return generateQuiz({ ...params, context: text })
 }
 
 // ── Generate from uploaded PDF URL ────────────────────────────
-// Extracts text with PDF.js (cached) then calls generateQuiz.
-// Token cost: ~30 K instead of millions. No rate-limit pressure.
 export async function generateFromPDF(
   pdfUrl: string,
   params: QuizGenParams,
@@ -213,7 +165,6 @@ export async function generateFromPDF(
   const text = await extractPDFTextFromURL(pdfUrl)
   return generateQuiz({
     ...params,
-    // Merge with any explicit context already in params (e.g. chapter focus)
     context: params.context
       ? `${params.context}\n\nFULL STUDY MATERIAL:\n${text}`
       : text,
@@ -237,10 +188,7 @@ export interface InsightsData {
 }
 
 export async function generateInsights(data: InsightsData): Promise<string> {
-  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
-
-  const prompt = `
-You are an educational analytics assistant for a private tutor in India.
+  const prompt = `You are an educational analytics assistant for a private tutor in India.
 Analyse the teaching data below and return 6–8 short, actionable insights.
 
 Data:
@@ -254,9 +202,7 @@ Guidelines:
 - Include at least one billing / business insight.
 - Include at least one curriculum / learning insight.
 
-Return ONLY the insights, one per line. No headers, no numbering.
-`.trim()
+Return ONLY the insights, one per line. No headers, no numbering.`
 
-  const result = await model.generateContent(prompt)
-  return result.response.text().trim()
+  return chat(prompt)
 }
