@@ -63,6 +63,30 @@ Return ONLY a valid JSON array — no markdown, no explanation, no extra text:
   return parsed.map((q, i) => ({ ...q, id: String(i + 1) }))
 }
 
+// ── Extract topics / chapters from a PDF URL ───────────────────
+export async function extractTopicsFromURL(pdfUrl: string): Promise<string[]> {
+  const model = getClient().getGenerativeModel({ model: 'gemini-2.0-flash' })
+
+  const res = await fetch(pdfUrl)
+  if (!res.ok) throw new Error('Could not fetch PDF for topic extraction')
+  const buf = await res.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  const chunk = 8192
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...Array.from(bytes.subarray(i, i + chunk)))
+  }
+  const base64 = btoa(binary)
+
+  const result = await model.generateContent([
+    { inlineData: { mimeType: 'application/pdf', data: base64 } },
+    { text: 'List every distinct chapter, section, topic and sub-topic found in this PDF. Return ONLY a valid JSON array of concise topic names (max 25 items), no markdown, no explanation:\n["Topic 1","Topic 2",...]' },
+  ])
+  const raw = result.response.text().trim()
+  const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/, '').trim()
+  return JSON.parse(jsonStr) as string[]
+}
+
 // ── Generate from a local PDF File (browser FileReader, no upload) ─
 export async function generateFromPDFFile(
   file: File,

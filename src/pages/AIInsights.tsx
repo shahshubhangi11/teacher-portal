@@ -1,11 +1,11 @@
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { format } from 'date-fns'
 import {
   Sparkles, Brain, RefreshCw, Wand2, Plus, Trash2,
   BookOpen, ChevronDown, ChevronUp, Save, Loader2, AlertCircle,
-  FileText, Upload, X, File,
+  FileText, Check, ChevronsUpDown,
 } from 'lucide-react'
-import { generateQuiz, generateInsights, generateFromPDFFile, QuizGenParams } from '../lib/ai'
+import { generateQuiz, generateInsights, generateFromPDF, extractTopicsFromURL, QuizGenParams } from '../lib/ai'
 import { useStudents } from '../hooks/useStudents'
 import { useSessions } from '../hooks/useSessions'
 import { useNotes } from '../hooks/useNotes'
@@ -30,7 +30,7 @@ export default function AIInsights() {
   const { sessions } = useSessions()
   const { notes } = useNotes()
   const { totalEarned, totalPending } = useBilling()
-  const { addContent } = useContent()
+  const { addContent, items: contentItems } = useContent()
 
   const [activeTab, setActiveTab] = useState<'insights' | 'quiz' | 'pdf'>('insights')
 
@@ -51,45 +51,89 @@ export default function AIInsights() {
   const [expandedQ, setExpandedQ] = useState<number | null>(null)
 
   // ── PDF → Content state ─────────────────────────────────────────
-  const pdfFileRef = useRef<HTMLInputElement>(null)
-  const [pdfStudentId, setPdfStudentId]       = useState('')
-  const [pdfSubject, setPdfSubject]           = useState('English')
-  const [pdfContentType, setPdfContentType]   = useState<'worksheet'|'quiz'|'test'>('quiz')
-  const [pdfDifficulty, setPdfDifficulty]     = useState<'easy'|'medium'|'hard'>('medium')
-  const [pdfNumQ, setPdfNumQ]                 = useState(5)
-  const [pdfQTypes, setPdfQTypes]             = useState<('mcq'|'short'|'fill'|'long')[]>(['mcq','short'])
-  const [pdfFile, setPdfFile]                 = useState<File | null>(null)
-  const [pdfLoading, setPdfLoading]           = useState(false)
-  const [pdfQuestions, setPdfQuestions]       = useState<Question[]>([])
-  const [pdfTitle, setPdfTitle]               = useState('')
-  const [savingPdf, setSavingPdf]             = useState(false)
-  const [pdfExpandedQ, setPdfExpandedQ]       = useState<number | null>(null)
+  const [pdfStudentId, setPdfStudentId]         = useState('')
+  const [pdfContentId, setPdfContentId]         = useState('')
+  const [pdfSubject, setPdfSubject]             = useState('English')
+  const [pdfContentType, setPdfContentType]     = useState<'worksheet'|'quiz'|'test'>('quiz')
+  const [pdfDifficulty, setPdfDifficulty]       = useState<'easy'|'medium'|'hard'>('medium')
+  const [pdfNumQ, setPdfNumQ]                   = useState(5)
+  const [pdfQTypes, setPdfQTypes]               = useState<('mcq'|'short'|'fill'|'long')[]>(['mcq','short'])
+  const [pdfTopics, setPdfTopics]               = useState<string[]>([])
+  const [selectedTopics, setSelectedTopics]     = useState<string[]>([])
+  const [extractingTopics, setExtractingTopics] = useState(false)
+  const [topicsOpen, setTopicsOpen]             = useState(false)
+  const [pdfLoading, setPdfLoading]             = useState(false)
+  const [pdfQuestions, setPdfQuestions]         = useState<Question[]>([])
+  const [pdfTitle, setPdfTitle]                 = useState('')
+  const [savingPdf, setSavingPdf]               = useState(false)
+  const [pdfExpandedQ, setPdfExpandedQ]         = useState<number | null>(null)
+  const topicsRef = useRef<HTMLDivElement>(null)
+
+  // PDFs available: filter by selected student if chosen
+  const availablePDFs = useMemo(() =>
+    contentItems.filter(c => c.fileUrl && (!pdfStudentId || c.studentId === pdfStudentId || !c.studentId)),
+    [contentItems, pdfStudentId])
+
+  const selectedPDF = contentItems.find(c => c.id === pdfContentId)
+  const pdfStudent  = students.find(s => s.id === pdfStudentId)
+
+  // Auto-select student's subject when student changes
+  useEffect(() => {
+    if (pdfStudent?.subjects?.length) setPdfSubject(pdfStudent.subjects[0])
+  }, [pdfStudentId])
+
+  // Extract topics whenever a PDF is selected
+  useEffect(() => {
+    if (!pdfContentId || !selectedPDF?.fileUrl) { setPdfTopics([]); setSelectedTopics([]); return }
+    setExtractingTopics(true)
+    setPdfTopics([]); setSelectedTopics([])
+    extractTopicsFromURL(selectedPDF.fileUrl)
+      .then(topics => { setPdfTopics(topics); setSelectedTopics(topics) })
+      .catch(() => toast.error('Could not extract topics — check PDF is publicly accessible'))
+      .finally(() => setExtractingTopics(false))
+  }, [pdfContentId])
+
+  // Close topics dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (topicsRef.current && !topicsRef.current.contains(e.target as Node)) setTopicsOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
 
   const togglePdfQType = (t: 'mcq'|'short'|'fill'|'long') =>
     setPdfQTypes(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
 
-  const pdfStudent = students.find(s => s.id === pdfStudentId)
+  const toggleTopic = (t: string) =>
+    setSelectedTopics(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
 
   const handleGenerateFromPDF = async () => {
-    if (!pdfFile) { toast.error('Select a PDF file first'); return }
+    if (!selectedPDF?.fileUrl) { toast.error('Select a PDF from the Content Library first'); return }
     if (pdfQTypes.length === 0) { toast.error('Select at least one question type'); return }
     if (!import.meta.env.VITE_GEMINI_API_KEY) { toast.error('Add VITE_GEMINI_API_KEY first'); return }
-    setPdfLoading(true)
-    setPdfQuestions([])
+    setPdfLoading(true); setPdfQuestions([])
     try {
-      const questions = await generateFromPDFFile(pdfFile, {
-        topic:         pdfFile.name.replace('.pdf',''),
+      const topicContext = selectedTopics.length > 0
+        ? `Focus ONLY on these topics: ${selectedTopics.join(', ')}`
+        : ''
+      const questions = await generateFromPDF(selectedPDF.fileUrl, {
+        topic:         selectedTopics.length > 0 ? selectedTopics.join(', ') : selectedPDF.title,
         subject:       pdfSubject,
-        grade:         pdfStudent?.grade ?? '6',
-        board:         pdfStudent?.board ?? 'CBSE',
+        grade:         pdfStudent?.grade ?? selectedPDF.grade ?? '6',
+        board:         (pdfStudent?.board ?? selectedPDF.board ?? 'CBSE') as string,
         difficulty:    pdfDifficulty,
         numQuestions:  pdfNumQ,
         questionTypes: pdfQTypes,
+        context:       topicContext,
       })
       setPdfQuestions(questions)
       const label = pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'
-      setPdfTitle(`${pdfFile.name.replace('.pdf','')} — ${label}`)
-      toast.success(`${questions.length} questions generated from PDF! ✅`)
+      const topicStr = selectedTopics.length > 0 && selectedTopics.length <= 3
+        ? ` (${selectedTopics.join(', ')})`
+        : ''
+      setPdfTitle(`${selectedPDF.title}${topicStr} — ${label}`)
+      toast.success(`${questions.length} questions generated! ✅`)
     } catch (e: any) {
       toast.error(e?.message ?? 'Generation failed')
     } finally {
@@ -105,10 +149,10 @@ export default function AIInsights() {
       await addContent({
         title:       pdfTitle,
         type:        pdfContentType,
-        board:       (pdfStudent?.board ?? 'CBSE') as any,
-        grade:       pdfStudent?.grade ?? 'All',
+        board:       (pdfStudent?.board ?? selectedPDF?.board ?? 'CBSE') as any,
+        grade:       pdfStudent?.grade ?? selectedPDF?.grade ?? 'All',
         subject:     pdfSubject,
-        description: `AI-generated from PDF: ${pdfFile?.name}`,
+        description: `AI-generated from "${selectedPDF?.title}"${selectedTopics.length ? ` — Topics: ${selectedTopics.join(', ')}` : ''}`,
         body: '', questions: pdfQuestions, totalMarks,
         duration:    pdfContentType === 'test' ? 60 : 30,
         tags: ['ai-generated', 'from-pdf'], forLD: false,
@@ -117,7 +161,7 @@ export default function AIInsights() {
         studentName: pdfStudent?.name ?? '',
       })
       toast.success('Saved to Content Library! 🎉')
-      setPdfQuestions([]); setPdfFile(null); setPdfTitle('')
+      setPdfQuestions([]); setPdfTitle(''); setPdfContentId(''); setSelectedTopics([]); setPdfTopics([])
     } catch {
       toast.error('Failed to save')
     } finally {
@@ -438,38 +482,101 @@ export default function AIInsights() {
                 </div>
               </div>
 
-              {/* Step 4: Upload PDF */}
+              {/* Step 4: Select PDF from Content Library */}
               <div>
-                <label className="label">Step 4 — Upload PDF</label>
-                <div
-                  onClick={() => pdfFileRef.current?.click()}
-                  className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors ${pdfFile ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}
-                >
-                  {pdfFile ? (
-                    <div className="flex items-center justify-center gap-3">
-                      <File size={22} className="text-indigo-500 flex-shrink-0" />
-                      <div className="text-left">
-                        <div className="text-sm font-medium text-slate-800">{pdfFile.name}</div>
-                        <div className="text-xs text-slate-500">{(pdfFile.size / 1024).toFixed(0)} KB</div>
-                      </div>
-                      <button type="button" onClick={e => { e.stopPropagation(); setPdfFile(null) }}
-                        className="ml-auto p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500">
-                        <X size={14} />
+                <label className="label">Step 4 — Select PDF from Content Library</label>
+                {availablePDFs.length === 0 ? (
+                  <div className="border-2 border-dashed border-slate-200 rounded-xl p-4 text-center">
+                    <p className="text-sm text-slate-400">No PDFs found.{pdfStudentId ? ' Try selecting a different student or' : ''} Go to <strong>Content → Student PDFs</strong> to add PDFs first.</p>
+                  </div>
+                ) : (
+                  <select className="input" value={pdfContentId} onChange={e => { setPdfContentId(e.target.value); setPdfQuestions([]) }}>
+                    <option value="">— Select a PDF —</option>
+                    {availablePDFs.map(c => (
+                      <option key={c.id} value={c.id}>
+                        {c.title}{c.studentName ? ` · ${c.studentName}` : ''}{c.grade !== 'All' ? ` · Grade ${c.grade}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {selectedPDF && (
+                  <p className="text-xs text-green-600 mt-1">✓ {selectedPDF.fileName || selectedPDF.title}</p>
+                )}
+              </div>
+
+              {/* Step 5: Topic selection (auto-extracted from PDF) */}
+              {pdfContentId && (
+                <div>
+                  <label className="label">
+                    Step 5 — Select Topics
+                    {extractingTopics && <span className="ml-2 text-indigo-500 font-normal text-xs flex items-center gap-1 inline-flex"><Loader2 size={11} className="animate-spin" /> Extracting topics from PDF…</span>}
+                    {!extractingTopics && pdfTopics.length > 0 && (
+                      <span className="ml-2 text-slate-400 font-normal text-xs">({selectedTopics.length}/{pdfTopics.length} selected)</span>
+                    )}
+                  </label>
+
+                  {!extractingTopics && pdfTopics.length > 0 && (
+                    <div ref={topicsRef} className="relative">
+                      {/* Dropdown trigger */}
+                      <button
+                        type="button"
+                        onClick={() => setTopicsOpen(o => !o)}
+                        className="input w-full flex items-center justify-between text-left"
+                      >
+                        <span className="truncate text-sm">
+                          {selectedTopics.length === 0
+                            ? 'Select topics…'
+                            : selectedTopics.length === pdfTopics.length
+                              ? 'All topics selected'
+                              : selectedTopics.slice(0,2).join(', ') + (selectedTopics.length > 2 ? ` +${selectedTopics.length - 2} more` : '')}
+                        </span>
+                        <ChevronsUpDown size={14} className="text-slate-400 flex-shrink-0 ml-2" />
                       </button>
+
+                      {/* Dropdown panel */}
+                      {topicsOpen && (
+                        <div className="absolute z-30 top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-64 overflow-y-auto">
+                          {/* Select All / Clear */}
+                          <div className="flex gap-2 px-3 py-2 border-b border-slate-100 sticky top-0 bg-white">
+                            <button type="button" onClick={() => setSelectedTopics([...pdfTopics])}
+                              className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Select All</button>
+                            <span className="text-slate-300">|</span>
+                            <button type="button" onClick={() => setSelectedTopics([])}
+                              className="text-xs text-slate-500 hover:text-slate-700">Clear All</button>
+                          </div>
+                          {pdfTopics.map(topic => (
+                            <button
+                              key={topic}
+                              type="button"
+                              onClick={() => toggleTopic(topic)}
+                              className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 text-left transition-colors"
+                            >
+                              <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 transition-colors ${selectedTopics.includes(topic) ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300'}`}>
+                                {selectedTopics.includes(topic) && <Check size={10} className="text-white" />}
+                              </div>
+                              <span className="text-sm text-slate-700">{topic}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  ) : (
-                    <div>
-                      <Upload size={28} className="text-slate-300 mx-auto mb-2" />
-                      <p className="text-sm text-slate-500 font-medium">Click to select PDF</p>
-                      <p className="text-xs text-slate-400 mt-0.5">AI will read the full content and generate questions</p>
+                  )}
+
+                  {/* Selected topics as chips */}
+                  {selectedTopics.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {selectedTopics.map(t => (
+                        <span key={t} className="inline-flex items-center gap-1 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full">
+                          {t}
+                          <button type="button" onClick={() => toggleTopic(t)} className="hover:text-red-500 ml-0.5">×</button>
+                        </span>
+                      ))}
                     </div>
                   )}
                 </div>
-                <input ref={pdfFileRef} type="file" accept=".pdf" className="hidden"
-                  onChange={e => setPdfFile(e.target.files?.[0] ?? null)} />
-              </div>
+              )}
 
-              {/* Step 5: Settings */}
+              {/* Step 6: Difficulty + Questions */}
               <div className="grid sm:grid-cols-2 gap-4">
                 <div>
                   <label className="label">Difficulty</label>
@@ -513,12 +620,12 @@ export default function AIInsights() {
               {/* Generate button */}
               <button
                 onClick={handleGenerateFromPDF}
-                disabled={pdfLoading || !pdfFile || !hasGeminiKey || pdfQTypes.length === 0}
+                disabled={pdfLoading || !pdfContentId || !hasGeminiKey || pdfQTypes.length === 0 || extractingTopics}
                 className="btn-primary w-full justify-center py-3"
               >
                 {pdfLoading
                   ? <><Loader2 size={16} className="animate-spin" /> Reading PDF & Generating…</>
-                  : <><Sparkles size={16} /> Generate {pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'} from PDF</>}
+                  : <><Sparkles size={16} /> Generate {pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'}{selectedTopics.length > 0 ? ` (${selectedTopics.length} topic${selectedTopics.length > 1 ? 's' : ''})` : ''}</>}
               </button>
             </div>
           </div>
