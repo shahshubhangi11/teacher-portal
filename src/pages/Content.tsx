@@ -1,10 +1,10 @@
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import {
   Plus, BookOpen, Edit2, Trash2, Eye, Printer,
   FileText, Brain, PenTool, Type, Search,
-  Upload, Download, File, X, Loader2, Sparkles,
+  Upload, Download, File, X, Loader2, Sparkles, Check, ChevronsUpDown,
 } from 'lucide-react'
-import { generateQuiz, generateFromPDF } from '../lib/ai'
+import { generateQuiz, generateFromPDF, extractTopicsFromURL } from '../lib/ai'
 import { useAuth } from '../contexts/AuthContext'
 import { useContent } from '../hooks/useContent'
 import { useStudents } from '../hooks/useStudents'
@@ -70,25 +70,71 @@ export default function Content() {
   const [genQTypes, setGenQTypes]       = useState<('mcq'|'short'|'fill'|'long')[]>(['mcq','short'])
   const [genContext, setGenContext]     = useState('')
   const [isGenerating, setIsGenerating] = useState(false)
+  const [genTopicMode, setGenTopicMode] = useState<'all'|'single'|'multiple'>('all')
+  const [genTopics, setGenTopics]       = useState<string[]>([])
+  const [genSelectedTopics, setGenSelectedTopics] = useState<string[]>([])
+  const [genSingleTopic, setGenSingleTopic]       = useState('')
+  const [genExtractingTopics, setGenExtractingTopics] = useState(false)
+  const [genTopicsOpen, setGenTopicsOpen] = useState(false)
+  const genTopicsRef = useRef<HTMLDivElement>(null)
 
   const toggleGenQType = (t: 'mcq'|'short'|'fill'|'long') =>
     setGenQTypes(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
+
+  const toggleGenTopic = (t: string) =>
+    setGenSelectedTopics(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
+
+  const effectiveGenTopics = genTopicMode === 'all'
+    ? []
+    : genTopicMode === 'single'
+      ? (genSingleTopic ? [genSingleTopic] : [])
+      : genSelectedTopics
+
+  const handleExtractGenTopics = async () => {
+    if (!genSource?.fileUrl) return
+    setGenExtractingTopics(true)
+    setGenTopics([]); setGenSelectedTopics([]); setGenSingleTopic('')
+    try {
+      const topics = await extractTopicsFromURL(genSource.fileUrl)
+      setGenTopics(topics)
+      setGenSelectedTopics(topics)
+      setGenSingleTopic(topics[0] ?? '')
+    } catch (e: any) {
+      const msg: string = e?.message ?? 'Failed to extract topics'
+      const retryMatch = msg.match(/retry in (\d+(\.\d+)?)s/i)
+      const friendly = retryMatch
+        ? `Gemini rate limit — wait ${Math.ceil(parseFloat(retryMatch[1]))}s and try again`
+        : msg.includes('quota') ? 'Gemini quota exceeded. Wait a minute and retry.'
+        : msg
+      toast.error(friendly)
+    } finally {
+      setGenExtractingTopics(false)
+    }
+  }
 
   const handleGenerate = async () => {
     if (!genSource || genQTypes.length === 0) {
       toast.error('Select at least one question type'); return
     }
+    if (genTopicMode !== 'all' && effectiveGenTopics.length === 0) {
+      toast.error('Select at least one chapter / topic'); return
+    }
     setIsGenerating(true)
     try {
+      const topicStr = effectiveGenTopics.length > 0
+        ? effectiveGenTopics.join(', ')
+        : genSource.title
       const params = {
-        topic:         genSource.title,
+        topic:         topicStr,
         subject:       genSource.subject,
         grade:         genSource.grade === 'All' ? '6' : genSource.grade,
         board:         genSource.board === 'All' ? 'CBSE' : String(genSource.board),
         difficulty:    genDifficulty,
         numQuestions:  genNumQ,
         questionTypes: genQTypes,
-        context:       genContext.trim() || genSource.body || genSource.description || genSource.title,
+        context:       effectiveGenTopics.length > 0
+          ? `Focus ONLY on these chapters/topics: ${effectiveGenTopics.join(', ')}`
+          : genContext.trim() || genSource.body || genSource.description || genSource.title,
       }
 
       // Use PDF reading if the source has an uploaded PDF, otherwise use text context
@@ -98,13 +144,16 @@ export default function Content() {
 
       const totalMarks = questions.reduce((s, q) => s + q.marks, 0)
       const label = genOutputType === 'worksheet' ? 'Worksheet' : genOutputType === 'quiz' ? 'Quiz' : 'Exam Paper'
+      const topicSuffix = effectiveGenTopics.length > 0 && effectiveGenTopics.length <= 2
+        ? ` (${effectiveGenTopics.join(', ')})`
+        : effectiveGenTopics.length > 2 ? ` (${effectiveGenTopics.length} topics)` : ''
       await addContent({
-        title:       `${genSource.title} — ${label}`,
+        title:       `${genSource.title}${topicSuffix} — ${label}`,
         type:        genOutputType,
         board:       genSource.board,
         grade:       genSource.grade,
         subject:     genSource.subject,
-        description: `AI-generated from "${genSource.title}"`,
+        description: `AI-generated from "${genSource.title}"${effectiveGenTopics.length ? ` — Topics: ${effectiveGenTopics.join(', ')}` : ''}`,
         body: '', questions, totalMarks,
         duration:    genOutputType === 'test' ? 60 : 30,
         tags: [], forLD: genSource.forLD ?? false,
@@ -131,6 +180,25 @@ export default function Content() {
   const [uploadProgress, setUploadProgress] = useState(0)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Reset topic state whenever the source content item changes
+  useEffect(() => {
+    setGenTopicMode('all')
+    setGenTopics([])
+    setGenSelectedTopics([])
+    setGenSingleTopic('')
+    setGenTopicsOpen(false)
+  }, [genSource?.id])
+
+  // Close topic dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (genTopicsRef.current && !genTopicsRef.current.contains(e.target as Node))
+        setGenTopicsOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
 
   const activeTypes = useMemo((): ContentType[] => {
     if (mainTab === 'student-pdfs') return ['grammar-worksheet','maths-practice','worksheet','study-material','quiz','test','writing-skills','ld-material']
@@ -648,6 +716,103 @@ export default function Content() {
                 ))}
               </div>
             </div>
+
+            {/* Chapter / Topic selection — only when source has a PDF */}
+            {genSource.fileUrl && (
+              <div className="space-y-3">
+                <label className="label">Chapter / Topic Selection</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    ['all',      '📖 All Chapters'],
+                    ['single',   '📄 Single Chapter'],
+                    ['multiple', '☑️ Multiple Chapters'],
+                  ] as const).map(([val, lbl]) => (
+                    <button key={val} type="button"
+                      onClick={() => setGenTopicMode(val)}
+                      className={`py-2 px-2 rounded-xl border text-xs font-medium transition-all ${genTopicMode === val ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}`}
+                    >{lbl}</button>
+                  ))}
+                </div>
+
+                {/* Extract button — only when single/multiple mode and no topics yet */}
+                {genTopicMode !== 'all' && genTopics.length === 0 && (
+                  <button type="button" onClick={handleExtractGenTopics} disabled={genExtractingTopics}
+                    className="btn-secondary w-full justify-center">
+                    {genExtractingTopics
+                      ? <><Loader2 size={14} className="animate-spin" /> Extracting chapters from PDF…</>
+                      : <><Sparkles size={14} /> Extract Chapters / Topics from PDF</>}
+                  </button>
+                )}
+
+                {/* SINGLE mode — radio dropdown */}
+                {genTopicMode === 'single' && genTopics.length > 0 && (
+                  <div ref={genTopicsRef} className="relative">
+                    <button type="button" onClick={() => setGenTopicsOpen(o => !o)}
+                      className="input w-full flex items-center justify-between text-left">
+                      <span className="text-sm truncate">{genSingleTopic || 'Select a chapter…'}</span>
+                      <ChevronsUpDown size={14} className="text-slate-400 flex-shrink-0 ml-2" />
+                    </button>
+                    {genTopicsOpen && (
+                      <div className="absolute z-30 top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-60 overflow-y-auto">
+                        {genTopics.map(t => (
+                          <button key={t} type="button"
+                            onClick={() => { setGenSingleTopic(t); setGenTopicsOpen(false) }}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-indigo-50 text-left">
+                            <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${genSingleTopic === t ? 'border-indigo-600' : 'border-slate-300'}`}>
+                              {genSingleTopic === t && <div className="w-2 h-2 rounded-full bg-indigo-600" />}
+                            </div>
+                            <span className="text-sm text-slate-700">{t}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* MULTIPLE mode — checkbox dropdown + chips */}
+                {genTopicMode === 'multiple' && genTopics.length > 0 && (
+                  <div ref={genTopicsRef} className="relative">
+                    <button type="button" onClick={() => setGenTopicsOpen(o => !o)}
+                      className="input w-full flex items-center justify-between text-left">
+                      <span className="text-sm truncate">
+                        {genSelectedTopics.length === 0 ? 'Select chapters…'
+                          : genSelectedTopics.length === genTopics.length ? 'All chapters selected'
+                          : genSelectedTopics.slice(0, 2).join(', ') + (genSelectedTopics.length > 2 ? ` +${genSelectedTopics.length - 2} more` : '')}
+                      </span>
+                      <ChevronsUpDown size={14} className="text-slate-400 flex-shrink-0 ml-2" />
+                    </button>
+                    {genTopicsOpen && (
+                      <div className="absolute z-30 top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-64 overflow-y-auto">
+                        <div className="flex gap-3 px-3 py-2 border-b border-slate-100 sticky top-0 bg-white">
+                          <button type="button" onClick={() => setGenSelectedTopics([...genTopics])} className="text-xs text-indigo-600 font-medium">Select All</button>
+                          <span className="text-slate-300">|</span>
+                          <button type="button" onClick={() => setGenSelectedTopics([])} className="text-xs text-slate-500">Clear All</button>
+                          <span className="ml-auto text-xs text-slate-400">{genSelectedTopics.length}/{genTopics.length}</span>
+                        </div>
+                        {genTopics.map(t => (
+                          <button key={t} type="button" onClick={() => toggleGenTopic(t)}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-slate-50 text-left">
+                            <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 ${genSelectedTopics.includes(t) ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300'}`}>
+                              {genSelectedTopics.includes(t) && <Check size={10} className="text-white" />}
+                            </div>
+                            <span className="text-sm text-slate-700">{t}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {genSelectedTopics.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {genSelectedTopics.map(t => (
+                          <span key={t} className="inline-flex items-center gap-1 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full">
+                            {t}<button type="button" onClick={() => toggleGenTopic(t)} className="hover:text-red-500">×</button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Context / extra notes — only shown if no PDF */}
             {!genSource.fileUrl && (
