@@ -6,6 +6,7 @@ import {
   FileText, Check, ChevronsUpDown,
 } from 'lucide-react'
 import { generateQuiz, generateInsights, generateFromPDF, extractTopicsFromURL, QuizGenParams } from '../lib/ai'
+import { callWithRetry } from '../lib/retry'
 import { useStudents } from '../hooks/useStudents'
 import { useSessions } from '../hooks/useSessions'
 import { useNotes } from '../hooks/useNotes'
@@ -69,7 +70,9 @@ export default function AIInsights() {
   const [pdfTitle, setPdfTitle]                 = useState('')
   const [savingPdf, setSavingPdf]               = useState(false)
   const [pdfExpandedQ, setPdfExpandedQ]         = useState<number | null>(null)
-  const topicsRef = useRef<HTMLDivElement>(null)
+  const topicsRef     = useRef<HTMLDivElement>(null)
+  // Session-scoped cache: contentId → extracted topic list (avoids redundant API calls)
+  const topicCacheRef = useRef<Map<string, string[]>>(new Map())
 
   // PDFs available: filter by selected student if chosen
   const availablePDFs = useMemo(() =>
@@ -121,14 +124,28 @@ export default function AIInsights() {
 
   const handleExtractTopics = async () => {
     if (!selectedPDF?.fileUrl) return
+
+    // Serve from session cache — avoids burning quota re-reading the same PDF
+    const cached = topicCacheRef.current.get(selectedPDF.id)
+    if (cached) {
+      setPdfTopics(cached); setSelectedTopics(cached); setSingleTopic(cached[0] ?? '')
+      return
+    }
+
     setExtractingTopics(true)
     setPdfTopics([]); setSelectedTopics([]); setSingleTopic('')
     try {
-      const topics = await extractTopicsFromURL(selectedPDF.fileUrl)
+      const topics = await callWithRetry(
+        () => extractTopicsFromURL(selectedPDF.fileUrl!),
+        (s) => toast.loading(`Rate limited — retrying in ${s}s…`, { id: 'rl-ext' }),
+      )
+      toast.dismiss('rl-ext')
+      topicCacheRef.current.set(selectedPDF.id, topics)
       setPdfTopics(topics)
       setSelectedTopics(topics)    // default: all selected
       setSingleTopic(topics[0] ?? '')
     } catch (e: any) {
+      toast.dismiss('rl-ext')
       toast.error(friendlyAIError(e))
     } finally {
       setExtractingTopics(false)
@@ -150,7 +167,7 @@ export default function AIInsights() {
     setPdfLoading(true); setPdfQuestions([])
     try {
       const topicStr = effectiveTopics.length > 0 ? effectiveTopics.join(', ') : selectedPDF.title
-      const questions = await generateFromPDF(selectedPDF.fileUrl, {
+      const params = {
         topic:         topicStr,
         subject:       pdfSubject,
         grade:         pdfStudent?.grade ?? (selectedPDF.grade !== 'All' ? selectedPDF.grade : '6'),
@@ -159,7 +176,12 @@ export default function AIInsights() {
         numQuestions:  pdfNumQ,
         questionTypes: pdfQTypes,
         context:       effectiveTopics.length > 0 ? `Focus ONLY on these chapters/topics: ${effectiveTopics.join(', ')}` : '',
-      })
+      }
+      const questions = await callWithRetry(
+        () => generateFromPDF(selectedPDF.fileUrl!, params),
+        (s) => toast.loading(`Rate limited — retrying in ${s}s…`, { id: 'rl-gen' }),
+      )
+      toast.dismiss('rl-gen')
       setPdfQuestions(questions)
       const label = pdfContentType === 'worksheet' ? 'Worksheet' : pdfContentType === 'quiz' ? 'Quiz' : 'Exam Paper'
       const topicSuffix = effectiveTopics.length > 0 && effectiveTopics.length <= 2
@@ -168,6 +190,7 @@ export default function AIInsights() {
       setPdfTitle(`${selectedPDF.title}${topicSuffix} — ${label}`)
       toast.success(`${questions.length} questions generated! ✅`)
     } catch (e: any) {
+      toast.dismiss('rl-gen')
       toast.error(friendlyAIError(e))
     } finally {
       setPdfLoading(false)
@@ -262,10 +285,15 @@ export default function AIInsights() {
     }
     setInsightsLoading(true)
     try {
-      const text = await generateInsights(insightsData)
+      const text = await callWithRetry(
+        () => generateInsights(insightsData),
+        (s) => toast.loading(`Rate limited — retrying in ${s}s…`, { id: 'rl-ins' }),
+      )
+      toast.dismiss('rl-ins')
       setInsights(text)
     } catch (e: any) {
-      toast.error(e.message ?? 'AI failed — check your Gemini API key')
+      toast.dismiss('rl-ins')
+      toast.error(friendlyAIError(e))
     } finally {
       setInsightsLoading(false)
     }
@@ -290,12 +318,17 @@ export default function AIInsights() {
     setQuizLoading(true)
     setGeneratedQuestions([])
     try {
-      const questions = await generateQuiz(quizForm)
+      const questions = await callWithRetry(
+        () => generateQuiz(quizForm),
+        (s) => toast.loading(`Rate limited — retrying in ${s}s…`, { id: 'rl-quiz' }),
+      )
+      toast.dismiss('rl-quiz')
       setGeneratedQuestions(questions)
       setQuizTitle(`${quizForm.topic} — ${quizForm.subject} Quiz`)
       toast.success(`${questions.length} questions generated!`)
     } catch (e: any) {
-      toast.error(e.message ?? 'AI failed — check your Gemini API key')
+      toast.dismiss('rl-quiz')
+      toast.error(friendlyAIError(e))
     } finally {
       setQuizLoading(false)
     }

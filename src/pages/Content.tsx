@@ -5,6 +5,7 @@ import {
   Upload, Download, File, X, Loader2, Sparkles, Check, ChevronsUpDown,
 } from 'lucide-react'
 import { generateQuiz, generateFromPDF, extractTopicsFromURL } from '../lib/ai'
+import { callWithRetry } from '../lib/retry'
 import { useAuth } from '../contexts/AuthContext'
 import { useContent } from '../hooks/useContent'
 import { useStudents } from '../hooks/useStudents'
@@ -76,7 +77,9 @@ export default function Content() {
   const [genSingleTopic, setGenSingleTopic]       = useState('')
   const [genExtractingTopics, setGenExtractingTopics] = useState(false)
   const [genTopicsOpen, setGenTopicsOpen] = useState(false)
-  const genTopicsRef = useRef<HTMLDivElement>(null)
+  const genTopicsRef  = useRef<HTMLDivElement>(null)
+  // Cache topics per content-item ID so the same PDF is never re-read in a session
+  const topicCacheRef = useRef<Map<string, string[]>>(new Map())
 
   const toggleGenQType = (t: 'mcq'|'short'|'fill'|'long') =>
     setGenQTypes(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t])
@@ -92,18 +95,34 @@ export default function Content() {
 
   const handleExtractGenTopics = async () => {
     if (!genSource?.fileUrl) return
+
+    // Use cached topics if available — avoids a redundant API call
+    const cached = topicCacheRef.current.get(genSource.id)
+    if (cached) {
+      setGenTopics(cached)
+      setGenSelectedTopics(cached)
+      setGenSingleTopic(cached[0] ?? '')
+      return
+    }
+
     setGenExtractingTopics(true)
     setGenTopics([]); setGenSelectedTopics([]); setGenSingleTopic('')
     try {
-      const topics = await extractTopicsFromURL(genSource.fileUrl)
+      const topics = await callWithRetry(
+        () => extractTopicsFromURL(genSource.fileUrl!),
+        (s) => toast.loading(`Rate limited — retrying in ${s}s…`, { id: 'rl-extract' }),
+      )
+      toast.dismiss('rl-extract')
+      topicCacheRef.current.set(genSource.id, topics)   // cache for this session
       setGenTopics(topics)
       setGenSelectedTopics(topics)
       setGenSingleTopic(topics[0] ?? '')
     } catch (e: any) {
+      toast.dismiss('rl-extract')
       const msg: string = e?.message ?? 'Failed to extract topics'
       const retryMatch = msg.match(/retry in (\d+(\.\d+)?)s/i)
       const friendly = retryMatch
-        ? `Gemini rate limit — wait ${Math.ceil(parseFloat(retryMatch[1]))}s and try again`
+        ? `Gemini quota hit — waited but still limited. Try again in a minute.`
         : msg.includes('quota') ? 'Gemini quota exceeded. Wait a minute and retry.'
         : msg
       toast.error(friendly)
@@ -138,9 +157,13 @@ export default function Content() {
       }
 
       // Use PDF reading if the source has an uploaded PDF, otherwise use text context
-      const questions = genSource.fileUrl
-        ? await generateFromPDF(genSource.fileUrl, params)
-        : await generateQuiz(params)
+      const questions = await callWithRetry(
+        () => genSource.fileUrl
+          ? generateFromPDF(genSource.fileUrl, params)
+          : generateQuiz(params),
+        (s) => toast.loading(`Rate limited — retrying in ${s}s…`, { id: 'rl-gen' }),
+      )
+      toast.dismiss('rl-gen')
 
       const totalMarks = questions.reduce((s, q) => s + q.marks, 0)
       const label = genOutputType === 'worksheet' ? 'Worksheet' : genOutputType === 'quiz' ? 'Quiz' : 'Exam Paper'
@@ -164,10 +187,11 @@ export default function Content() {
       toast.success(`${label} created and saved to Content Library! ✅`)
       setGenSource(null)
     } catch (e: any) {
+      toast.dismiss('rl-gen')
       const msg: string = e?.message ?? 'Generation failed'
       const retryMatch = msg.match(/retry in (\d+(\.\d+)?)s/i)
       const friendly = retryMatch
-        ? `Gemini rate limit — wait ${Math.ceil(parseFloat(retryMatch[1]))}s and try again`
+        ? `Gemini quota hit — waited but still limited. Try again in a minute.`
         : msg.includes('quota') ? 'Gemini quota exceeded. Wait a minute and retry.'
         : msg
       toast.error(friendly)
