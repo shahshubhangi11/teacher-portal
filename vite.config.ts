@@ -28,7 +28,7 @@ export default defineConfig({
       workbox: {
         // Cache all app routes for offline access
         navigateFallback: 'index.html',
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [
           {
             // Cache Firebase Firestore calls

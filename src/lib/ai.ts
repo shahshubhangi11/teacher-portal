@@ -77,13 +77,18 @@ export async function extractPDFTextFromURL(pdfUrl: string): Promise<string> {
     pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
   } catch (e: any) {
     const name: string = e?.name ?? ''
-    if (name === 'InvalidPDFException' || name === 'MissingPDFException') {
+    const msg: string = (e?.message ?? '').toLowerCase()
+    if (
+      name === 'InvalidPDFException' || name === 'MissingPDFException' ||
+      msg.includes('invalid pdf') || msg.includes('pdf structure') ||
+      msg.includes('missing pdf') || msg.includes('not a pdf')
+    ) {
       throw new Error(
         'PDF structure is invalid or the file is corrupted. ' +
         'Try opening the PDF in Adobe Reader first, then re-upload.'
       )
     }
-    if (name === 'PasswordException') {
+    if (name === 'PasswordException' || msg.includes('password')) {
       throw new Error('This PDF is password-protected. Remove the password before uploading.')
     }
     throw e
@@ -205,17 +210,24 @@ export async function generateFromPDFFile(
 }
 
 // ── Generate from uploaded PDF URL ────────────────────────────
+// Falls back to topic-only generation if PDF.js cannot parse the file.
 export async function generateFromPDF(
   pdfUrl: string,
   params: QuizGenParams,
 ): Promise<Question[]> {
-  const text = await extractPDFTextFromURL(pdfUrl)
-  return generateQuiz({
-    ...params,
-    context: params.context
-      ? `${params.context}\n\nFULL STUDY MATERIAL:\n${text}`
-      : text,
-  })
+  let context = params.context ?? ''
+  try {
+    const pdfText = await extractPDFTextFromURL(pdfUrl)
+    if (pdfText.trim()) {
+      context = params.context
+        ? `${params.context}\n\nFULL STUDY MATERIAL:\n${pdfText}`
+        : pdfText
+    }
+  } catch {
+    // PDF.js failed (corrupted, scanned, cross-origin, etc.) — fall back to
+    // topic-only generation so the user still gets useful questions.
+  }
+  return generateQuiz({ ...params, context: context || undefined })
 }
 
 // ── Student Insights ────────────────────────────────────────────
